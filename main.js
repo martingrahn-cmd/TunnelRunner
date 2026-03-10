@@ -451,6 +451,8 @@ let score = 0;
 let level = 1;
 let shipColorIdx = 0;
 const LEVEL_THRESHOLD = 3000;
+let lives = 3;
+let hitFlash = 0; // countdown timer for screen flash on hit
 
 // ── HUD ──
 const hudEl = document.createElement('div');
@@ -459,6 +461,11 @@ hudEl.innerHTML = `
   #hud-bar { position:fixed; top:0; left:0; width:100%; display:flex; justify-content:space-between; align-items:center; padding:16px 28px; font-family:'Courier New',monospace; font-size:20px; color:#fff; z-index:10; pointer-events:none; }
   #hud-bar > div { text-shadow: 0 0 10px rgba(255,255,255,0.5); }
   #hud-color-badge { padding:4px 14px; border:2px solid; border-radius:4px; font-weight:bold; letter-spacing:2px; }
+  #hud-lives { font-size:24px; letter-spacing:4px; }
+  #hud-flash { display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:12; pointer-events:none; background:radial-gradient(transparent 40%, rgba(255,0,68,0.4)); border:4px solid #ff0044; box-sizing:border-box; }
+  @keyframes hudFlash { 0%{opacity:1} 100%{opacity:0} }
+  #hud-hit { display:none; position:fixed; z-index:15; pointer-events:none; font-family:'Courier New',monospace; font-size:36px; font-weight:bold; color:#ff0044; text-shadow:0 0 20px #ff0044, 0 0 40px rgba(255,0,68,0.5); }
+  @keyframes hudHitPop { 0%{opacity:1;transform:translate(-50%,-50%) scale(1.5)} 50%{opacity:1;transform:translate(-50%,-80%) scale(1)} 100%{opacity:0;transform:translate(-50%,-120%) scale(0.8)} }
   #hud-overlay { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.75); z-index:20; align-items:center; justify-content:center; flex-direction:column; font-family:'Courier New',monospace; color:#fff; }
   #hud-overlay h1 { font-size:60px; margin:0 0 8px; color:#ff0044; text-shadow:0 0 40px #ff0044; }
   #hud-overlay .sub { font-size:22px; margin:6px 0; }
@@ -469,9 +476,12 @@ hudEl.innerHTML = `
 </style>
 <div id="hud-bar">
   <div id="hud-score">0</div>
+  <div id="hud-lives"></div>
   <div id="hud-level">LEVEL 1</div>
   <div id="hud-color-badge">CYAN</div>
 </div>
+<div id="hud-flash"></div>
+<div id="hud-hit">-1</div>
 <div id="hud-overlay">
   <h1>GAME OVER</h1>
   <p class="sub" id="hud-final">Score: 0 — Level 1</p>
@@ -484,11 +494,43 @@ document.body.appendChild(hudEl);
 function updateHUD() {
   document.getElementById('hud-score').textContent = score;
   document.getElementById('hud-level').textContent = `LEVEL ${level}`;
+  document.getElementById('hud-lives').textContent = '\u2764'.repeat(lives);
   const badge = document.getElementById('hud-color-badge');
   const gc = GAME_COLORS[shipColorIdx];
   badge.textContent = gc.name;
   badge.style.color = gc.css;
   badge.style.borderColor = gc.css;
+}
+
+function hitObstacle() {
+  lives--;
+  if (lives <= 0) {
+    showGameOver();
+  } else {
+    // Red vignette flash
+    const flash = document.getElementById('hud-flash');
+    flash.style.display = 'block';
+    flash.style.animation = 'none';
+    flash.offsetHeight;
+    flash.style.animation = 'hudFlash 0.6s forwards';
+    setTimeout(() => { flash.style.display = 'none'; }, 600);
+
+    // "-1" popup near the ship
+    if (shipGroup) {
+      const screenPos = shipGroup.position.clone().project(camera);
+      const hit = document.getElementById('hud-hit');
+      hit.style.left = ((screenPos.x * 0.5 + 0.5) * innerWidth) + 'px';
+      hit.style.top = ((1 - (screenPos.y * 0.5 + 0.5)) * innerHeight) + 'px';
+      hit.style.display = 'block';
+      hit.style.animation = 'none';
+      hit.offsetHeight;
+      hit.style.animation = 'hudHitPop 0.8s forwards';
+      setTimeout(() => { hit.style.display = 'none'; }, 800);
+    }
+
+    spawnSafe = 1.5;
+    updateHUD();
+  }
 }
 
 function showGameOver() {
@@ -515,6 +557,7 @@ function restartGame() {
   gameState = 'playing';
   score = 0;
   level = 1;
+  lives = 3;
   shipColorIdx = 0;
   progress = 0.0;
   rollAngle = 0;
@@ -620,49 +663,25 @@ shipGroup.userData.baseScale = 1;
 scene.add(shipGroup);
 
 // ═══════════════════════════════════════════════════
-// OBSTACLES — 3D shapes blocking parts of the tunnel
+// OBSTACLES — thick wall segments on the tunnel wall (Tunnel Rush style)
 // ═══════════════════════════════════════════════════
 const obstacles = [];
-const SHIP_HIT_R = 1.2;
 const TUBE_R = 14;
 
-// Creates a pie-slice shape (wedge from center to tunnel wall)
-function createSliceGeo(innerR, outerR, sliceAngle, depth) {
-  const shape = new THREE.Shape();
-  const steps = 16;
-  // Start at inner radius
-  const a0 = -sliceAngle / 2;
-  shape.moveTo(Math.cos(a0) * innerR, Math.sin(a0) * innerR);
-  // Outer arc
-  for (let i = 0; i <= steps; i++) {
-    const a = a0 + (i / steps) * sliceAngle;
-    shape.lineTo(Math.cos(a) * outerR, Math.sin(a) * outerR);
-  }
-  // Inner arc back
-  for (let i = steps; i >= 0; i--) {
-    const a = a0 + (i / steps) * sliceAngle;
-    shape.lineTo(Math.cos(a) * innerR, Math.sin(a) * innerR);
-  }
-  shape.closePath();
-  return new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
-}
-
-// Obstacle patterns: slices + gap configurations
-// Each pattern defines how many slices and which one(s) are missing
+// Obstacle patterns — Tunnel Rush style
+// innerR: how far the block reaches inward (lower = thicker wall, harder)
+// The ship flies at radius ~12.8
 const OBS_PATTERNS = [
-  { slices: 4, gaps: 1, innerR: 0,    name: '4-slice-1gap' },   // 4 big slices, 1 gap
-  { slices: 4, gaps: 1, innerR: 4,    name: '4-ring-1gap' },    // 4 ring segments, 1 gap (hole in center)
-  { slices: 3, gaps: 1, innerR: 0,    name: '3-slice-1gap' },   // 3 slices, 1 gap (bigger gap)
-  { slices: 6, gaps: 1, innerR: 3,    name: '6-ring-1gap' },    // 6 thin ring segments, 1 gap
-  { slices: 4, gaps: 2, innerR: 0,    name: '4-slice-2gap' },   // 4 slices, 2 opposite gaps (easier)
-  { slices: 5, gaps: 1, innerR: 2,    name: '5-ring-1gap' },    // 5 segments, 1 gap (harder)
+  { slices: 2, gaps: 1, innerR: 5,  name: 'half-wall' },      // thick half-wall
+  { slices: 3, gaps: 1, innerR: 6,  name: '3-wall-1gap' },    // 3 thick segments
+  { slices: 4, gaps: 1, innerR: 5,  name: '4-wall-1gap' },    // 4 segments, 1 gap
+  { slices: 4, gaps: 2, innerR: 6,  name: '4-wall-2gap' },    // 4 segments, 2 gaps (easier)
+  { slices: 2, gaps: 1, innerR: 3,  name: 'half-thick' },     // very thick half
+  { slices: 3, gaps: 1, innerR: 4,  name: '3-wall-thick' },   // 3 thick segments
 ];
 
 function generateObstacles() {
-  // Clean up old obstacles
-  obstacles.forEach(o => {
-    o.meshes.forEach(m => scene.remove(m));
-  });
+  obstacles.forEach(o => { if (o.mesh) scene.remove(o.mesh); });
   obstacles.length = 0;
 
   const count = 40;
@@ -674,72 +693,100 @@ function generateObstacles() {
     const pat = OBS_PATTERNS[patIdx];
 
     const sliceAngle = (Math.PI * 2) / pat.slices;
-    const gapPadding = 0.08; // small gap between slices
-    const geoAngle = sliceAngle - gapPadding;
-    const geo = createSliceGeo(pat.innerR, TUBE_R - 0.3, geoAngle, 1.0);
+    const padding = 0.10; // gap between segments
+    const segLength = 3.0; // depth along tunnel
 
-    // Pick which slice(s) to skip (the gap)
+    // Pick which segment(s) to skip (the gap to fly through)
     const gapStart = Math.floor(Math.random() * pat.slices);
     const gapIndices = new Set();
     for (let g = 0; g < pat.gaps; g++) {
       gapIndices.add((gapStart + g * Math.floor(pat.slices / pat.gaps)) % pat.slices);
     }
 
-    // Random base rotation for the whole obstacle
+    // Random rotation
     const randAngle = Math.random() * Math.PI * 2;
 
-    // Tunnel frame at this t
+    // Build all wall segments as one geometry
+    const shapes = [];
+    const steps = 32;
+    for (let s = 0; s < pat.slices; s++) {
+      if (gapIndices.has(s)) continue;
+
+      const a0 = s * sliceAngle + padding / 2;
+      const a1 = (s + 1) * sliceAngle - padding / 2;
+
+      const shape = new THREE.Shape();
+      // Outer arc
+      shape.moveTo(Math.cos(a0) * TUBE_R, Math.sin(a0) * TUBE_R);
+      for (let j = 1; j <= steps; j++) {
+        const a = a0 + (j / steps) * (a1 - a0);
+        shape.lineTo(Math.cos(a) * TUBE_R, Math.sin(a) * TUBE_R);
+      }
+      // Inner arc back
+      for (let j = steps; j >= 0; j--) {
+        const a = a0 + (j / steps) * (a1 - a0);
+        shape.lineTo(Math.cos(a) * pat.innerR, Math.sin(a) * pat.innerR);
+      }
+      shape.closePath();
+      shapes.push(shape);
+    }
+
+    const geo = new THREE.ExtrudeGeometry(shapes, { depth: segLength, bevelEnabled: false });
+    geo.translate(0, 0, -segLength / 2);
+
+    // Tunnel frame
     const pos = curve.getPointAt(t);
     const tan = curve.getTangentAt(t).normalize();
     const up = new THREE.Vector3(0, 1, 0);
     const right = new THREE.Vector3().crossVectors(tan, up).normalize();
     const normal = new THREE.Vector3().crossVectors(right, tan).normalize();
 
-    // Base orientation: align XY to cross-section, Z to tangent
-    const orientMat = new THREE.Matrix4();
-    orientMat.makeBasis(right, normal, tan);
+    const mat = new THREE.MeshStandardMaterial({
+      color: gc.hex,
+      emissive: gc.hex,
+      emissiveIntensity: 0.6,
+      metalness: 0.4,
+      roughness: 0.3,
+      transparent: true,
+      opacity: 0.85,
+      side: THREE.DoubleSide,
+      fog: true,
+    });
 
-    const meshes = [];
+    const mesh = new THREE.Mesh(geo, mat);
 
-    // The gap angle (where the opening is, in tunnel cross-section space)
-    // This is the center angle of the first gap slice
-    const gapAngle = randAngle + gapStart * sliceAngle + sliceAngle / 2;
+    // Edge outline
+    const edgeMat = new THREE.LineBasicMaterial({ color: 0xffffff, fog: false });
+    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo, 20), edgeMat));
 
-    for (let s = 0; s < pat.slices; s++) {
-      if (gapIndices.has(s)) continue; // This is the gap — skip
+    // Orient using lookAt — guaranteed correct right-handed rotation
+    // lookAt points -Z at target, so look BACKWARD to make +Z (extrusion) go forward
+    mesh.position.copy(pos);
+    mesh.up.copy(normal);
+    mesh.lookAt(pos.clone().sub(tan));
+    // Random rotation around tunnel axis
+    mesh.rotateZ(randAngle);
 
-      const mat = new THREE.MeshStandardMaterial({
-        color: gc.hex,
-        emissive: gc.hex,
-        emissiveIntensity: 0.5,
-        transparent: true,
-        opacity: 0.85,
-        metalness: 0.3,
-        roughness: 0.4,
-        side: THREE.DoubleSide,
-        fog: false,
-      });
+    mesh.visible = false;
+    scene.add(mesh);
 
-      const mesh = new THREE.Mesh(geo, mat);
-
-      // Neon edges
-      const edgeMat = new THREE.LineBasicMaterial({ color: gc.hex, fog: false });
-      mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo, 20), edgeMat));
-
-      mesh.position.copy(pos);
-      mesh.quaternion.setFromRotationMatrix(orientMat);
-      // Rotate to this slice's position + random offset
-      mesh.rotateOnAxis(new THREE.Vector3(0, 0, 1), randAngle + s * sliceAngle);
-
-      mesh.visible = false;
-      scene.add(mesh);
-      meshes.push(mesh);
+    // Store gap directions as world-space vectors (robust, no angle math needed)
+    mesh.updateMatrixWorld(true);
+    const gapDirs = [];
+    for (const gi of gapIndices) {
+      const gapCenterAngle = (gi + 0.5) * sliceAngle;
+      const gapDir = new THREE.Vector3(
+        Math.cos(gapCenterAngle),
+        Math.sin(gapCenterAngle),
+        0
+      ).transformDirection(mesh.matrixWorld).normalize();
+      gapDirs.push(gapDir);
     }
 
     obstacles.push({
-      t, colIdx, meshes,
-      gapAngle, // angle of the gap opening in cross-section
-      gapWidth: sliceAngle * pat.gaps, // angular width of gap
+      t, colIdx, mesh,
+      gapDirs,                          // world-space direction of each gap center
+      gapHalfCos: Math.cos(sliceAngle / 2 - 0.05), // cos of half-gap angle (with tolerance)
       innerR: pat.innerR,
       pattern: pat.name,
     });
@@ -1032,46 +1079,48 @@ function animate() {
     const absTd = Math.abs(td);
     const vis = absTd < 0.08;
 
-    // Show/hide all slice meshes
+    // Show/hide obstacle mesh
     const isMatch = obs.colIdx === shipColorIdx;
-    for (const m of obs.meshes) {
-      m.visible = vis;
-      if (vis) {
-        m.material.opacity = isMatch ? 0.12 : 0.85;
-        m.material.emissiveIntensity = isMatch ? 0.1 : 0.5;
-      }
+    obs.mesh.visible = vis;
+    if (vis) {
+      obs.mesh.material.opacity = isMatch ? 0.1 : 0.85;
+      obs.mesh.material.emissiveIntensity = isMatch ? 0.1 : 0.6;
     }
 
-    // Collision: when ship crosses obstacle, check if it's in the gap
+    // Collision: when ship crosses obstacle plane, check if it's in a gap
     if (gameState === 'playing') {
-      if (spawnSafe <= 0 && obs.lastTd !== undefined && obs.lastTd <= 0 && td > 0) {
+      const crossed = obs.lastTd !== undefined && obs.lastTd <= 0 && td > 0;
+      const inRange = absTd < 0.003;
+      if (spawnSafe <= 0 && (crossed || (inRange && !obs.checked))) {
         if (!isMatch && shipGroup) {
-          // Project ship into tunnel cross-section
           const obsCenter = curve.getPointAt(obs.t);
           const obsTan = curve.getTangentAt(obs.t).normalize();
-          const up3 = new THREE.Vector3(0, 1, 0);
-          const obsRight = new THREE.Vector3().crossVectors(obsTan, up3).normalize();
-          const obsUp = new THREE.Vector3().crossVectors(obsRight, obsTan).normalize();
 
+          // Ship direction from tunnel center (projected onto cross-section)
           const rel = shipGroup.position.clone().sub(obsCenter);
-          const sR = rel.dot(obsRight);
-          const sU = rel.dot(obsUp);
-          const shipAngle = Math.atan2(sU, sR);
-          const shipDist = Math.sqrt(sR * sR + sU * sU);
+          const alongTunnel = obsTan.clone().multiplyScalar(rel.dot(obsTan));
+          const shipDir = rel.clone().sub(alongTunnel).normalize();
+          const shipDist = rel.clone().sub(alongTunnel).length();
 
-          // Check if ship is in the gap opening
-          let angleDiff = shipAngle - obs.gapAngle;
-          while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
-          while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-          const inGap = Math.abs(angleDiff) < obs.gapWidth / 2 - 0.1;
-          const inCenter = shipDist < obs.innerR - SHIP_HIT_R; // inside the hole
-
-          // Hit if NOT in gap and NOT in center hole
-          if (!inGap && !inCenter) {
-            showGameOver();
+          // Check if ship direction aligns with ANY gap direction
+          let inGap = false;
+          for (const gapDir of obs.gapDirs) {
+            if (shipDir.dot(gapDir) > obs.gapHalfCos) {
+              inGap = true;
+              break;
+            }
           }
+
+          // Also safe if inside the inner hole
+          const inCenter = shipDist < obs.innerR + 1.0;
+
+          if (!inGap && !inCenter) {
+            hitObstacle();
+          }
+          obs.checked = true;
         }
       }
+      if (absTd > 0.01) obs.checked = false;
       obs.lastTd = td;
     }
   }
