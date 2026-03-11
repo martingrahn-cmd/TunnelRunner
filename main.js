@@ -420,8 +420,8 @@ const settings = {
   camOffZ: 0,
   shipOffX: 0,
   shipOffY: -11,
-  shipOffZ: -18,
-  shipScale: 0.35,
+  shipOffZ: -16.9,
+  shipScale: 2.4,
   shipRotX: 15,
   shipRotY: 0,
   shipRotZ: 0,
@@ -795,6 +795,139 @@ function generateObstacles() {
 
 generateObstacles();
 
+// ═══════════════════════════════════════════════════
+// OBSTACLE DESTRUCTION ANIMATION
+// ═══════════════════════════════════════════════════
+const debris = []; // active debris pieces
+
+function explodeObstacle(obs) {
+  const mesh = obs.mesh;
+  if (!mesh) return;
+
+  // Get obstacle world position, tangent, and color
+  const obsPos = mesh.position.clone();
+  const obsTan = curve.getTangentAt(obs.t).normalize();
+  const color = mesh.material.color.clone();
+  const emissive = mesh.material.emissive.clone();
+
+  // Get the obstacle's world rotation to orient debris properly
+  mesh.updateMatrixWorld(true);
+  const obsMatrix = mesh.matrixWorld.clone();
+
+  // Create debris fragments
+  const fragCount = 12 + Math.floor(Math.random() * 8);
+  const fragGroup = new THREE.Group();
+  fragGroup.position.copy(obsPos);
+  scene.add(fragGroup);
+
+  const pieces = [];
+  for (let i = 0; i < fragCount; i++) {
+    // Random small shard geometry
+    const size = 0.3 + Math.random() * 1.2;
+    const geo = Math.random() > 0.5
+      ? new THREE.BoxGeometry(size, size * 0.5, size * 0.3)
+      : new THREE.TetrahedronGeometry(size * 0.6);
+
+    const mat = new THREE.MeshStandardMaterial({
+      color,
+      emissive,
+      emissiveIntensity: 1.0,
+      metalness: 0.4,
+      roughness: 0.3,
+      transparent: true,
+      opacity: 1.0,
+      side: THREE.DoubleSide,
+    });
+
+    const frag = new THREE.Mesh(geo, mat);
+
+    // Start near the obstacle surface, spread radially in the obstacle's local frame
+    const angle = Math.random() * Math.PI * 2;
+    const radius = 2 + Math.random() * 8;
+    const localDir = new THREE.Vector3(
+      Math.cos(angle) * radius,
+      Math.sin(angle) * radius,
+      (Math.random() - 0.5) * 2
+    );
+    frag.position.copy(localDir);
+
+    // Random rotation
+    frag.rotation.set(
+      Math.random() * Math.PI * 2,
+      Math.random() * Math.PI * 2,
+      Math.random() * Math.PI * 2
+    );
+
+    fragGroup.add(frag);
+
+    // Velocity: outward radially in world space using obstacle's orientation
+    const worldVel = localDir.clone().normalize()
+      .transformDirection(obsMatrix)
+      .multiplyScalar(5 + Math.random() * 10);
+    // Also add forward velocity so debris flies ahead with the camera
+    worldVel.addScaledVector(obsTan, 3 + Math.random() * 5);
+
+    pieces.push({
+      mesh: frag,
+      vel: worldVel,
+      rotVel: new THREE.Vector3(
+        (Math.random() - 0.5) * 10,
+        (Math.random() - 0.5) * 10,
+        (Math.random() - 0.5) * 10
+      ),
+    });
+  }
+
+  debris.push({
+    group: fragGroup,
+    pieces,
+    obsTan: obsTan.clone(), // tunnel direction at this obstacle
+    age: 0,
+    maxAge: 1.5,
+  });
+
+  // Hide the original obstacle
+  mesh.visible = false;
+}
+
+function updateDebris(dt, cameraSpeed) {
+  for (let i = debris.length - 1; i >= 0; i--) {
+    const d = debris[i];
+    d.age += dt;
+
+    if (d.age >= d.maxAge) {
+      // Remove all debris
+      scene.remove(d.group);
+      d.group.traverse(child => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) child.material.dispose();
+      });
+      debris.splice(i, 1);
+      continue;
+    }
+
+    // Move entire debris group forward along tunnel so it stays in view
+    d.group.position.addScaledVector(d.obsTan, cameraSpeed * dt);
+
+    const fade = 1 - (d.age / d.maxAge);
+    for (const p of d.pieces) {
+      // Move fragment in world space (velocity already in world coords)
+      p.mesh.position.addScaledVector(p.vel, dt);
+      // Slow down
+      p.vel.multiplyScalar(0.97);
+      // Rotate
+      p.mesh.rotation.x += p.rotVel.x * dt;
+      p.mesh.rotation.y += p.rotVel.y * dt;
+      p.mesh.rotation.z += p.rotVel.z * dt;
+      // Fade & shrink
+      p.mesh.material.opacity = fade;
+      p.mesh.scale.setScalar(Math.max(0.1, fade));
+      // Increase emissive as it fades (glow effect)
+      p.mesh.material.emissiveIntensity = 0.6 + (1 - fade) * 2;
+    }
+  }
+}
+
 function tDist(playerT, obsT) {
   let d = playerT - obsT;
   if (d > 0.5) d -= 1;
@@ -1115,6 +1248,7 @@ function animate() {
           const inCenter = shipDist < obs.innerR + 1.0;
 
           if (!inGap && !inCenter) {
+            explodeObstacle(obs);
             hitObstacle();
           }
           obs.checked = true;
@@ -1136,6 +1270,10 @@ function animate() {
     }
     updateHUD();
   }
+
+  // Update debris explosion particles — pass tunnel speed (world units/sec) so debris follows camera
+  const camWorldSpeed = settings.speed * 0.1 * curve.getLength();
+  updateDebris(dt, camWorldSpeed);
 
   composer.render();
 }
