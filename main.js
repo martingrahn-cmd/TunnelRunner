@@ -19,7 +19,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'h
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 3.5;
+renderer.toneMappingExposure = 2.0;
 document.body.appendChild(renderer.domElement);
 
 // ═══════════════════════════════════════════════════
@@ -30,9 +30,9 @@ composer.addPass(new RenderPass(scene, camera));
 
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(innerWidth, innerHeight),
-  0.25,  // strength — matches settings
-  0.19,  // radius
-  0.35   // threshold
+  0.15,  // strength
+  0.1,   // radius
+  0.5    // threshold
 );
 composer.addPass(bloomPass);
 
@@ -127,6 +127,7 @@ const fragmentShader = `
   uniform float uRingCount;
   uniform sampler2D uMatrix;
   uniform float uMatrixInt;
+  uniform float uHue;
 
   varying vec2 vUv;
   varying vec3 vWorldPos;
@@ -134,6 +135,17 @@ const fragmentShader = `
 
   // Deterministic hash
   float hash(float n) { return fract(sin(n) * 43758.5453123); }
+
+  // Hue rotation (angle in radians)
+  vec3 hueShift(vec3 c, float angle) {
+    float s = sin(angle), co = cos(angle);
+    vec3 w = vec3(0.299, 0.587, 0.114);
+    return vec3(
+      c.x*(co + (1.0-co)*w.x) + c.y*((1.0-co)*w.x - s*0.328) + c.z*((1.0-co)*w.x + s*0.948),
+      c.x*((1.0-co)*w.y + s*0.328) + c.y*(co + (1.0-co)*w.y) + c.z*((1.0-co)*w.y - s*0.264),
+      c.x*((1.0-co)*w.z - s*0.948) + c.y*((1.0-co)*w.z + s*0.264) + c.z*(co + (1.0-co)*w.z)
+    );
+  }
 
   // ── Neon streak line ──────────────────────────
   vec3 neonLine(vec3 col, float uPri, float target, float width, float uSec, float id, float t, float sMul) {
@@ -278,8 +290,8 @@ const fragmentShader = `
     float cy = sin(y * 6.2831853);
     float cx = cos(y * 6.2831853);
 
-    // Mint green base that lights the whole tunnel evenly
-    vec3 mintBase = vec3(0.35, 0.85, 0.65) * 0.4;
+    // Base color that lights the whole tunnel evenly
+    vec3 mintBase = hueShift(vec3(0.35, 0.85, 0.65), uHue) * 0.3;
     // Subtle variation around the circumference
     mintBase *= 0.8 + 0.2 * (0.5 + 0.5 * cy);
 
@@ -338,8 +350,9 @@ const fragmentShader = `
     float fresnel = max(0.0, dot(-vWorldNorm, viewDir));
     float cavity = mix(0.5, 1.0, smoothstep(0.0, 0.8, fresnel));
 
+    finalCol = hueShift(finalCol, uHue);
     finalCol *= cavity;
-    finalCol = mix(uBgBot, finalCol, fog);
+    finalCol = mix(hueShift(uBgBot, uHue), finalCol, fog);
 
     gl_FragColor = vec4(finalCol, 1.0);
   }
@@ -353,12 +366,13 @@ const tubeMat = new THREE.ShaderMaterial({
     uBgTop:      { value: new THREE.Color('#1a4a3a') },
     uBgBot:      { value: new THREE.Color('#0d2a20') },
     uAngleOff:   { value: -0.25 },
-    uIntensity:  { value: 2.0 },
+    uIntensity:  { value: 1.2 },
     uDepthFade:  { value: 0.0006 },
     uReflect:    { value: 0.35 },
     uRingCount:  { value: 12.0 },
     uMatrix:     { value: matrixTex },
     uMatrixInt:  { value: 0.25 },
+    uHue:        { value: 0.0 },
   },
   side: THREE.BackSide,
 });
@@ -426,9 +440,9 @@ const settings = {
   shipRotY: 0,
   shipRotZ: 0,
   speed: 0.18,
-  bloomStrength: 0.25,
-  bloomRadius: 0.19,
-  bloomThreshold: 0.35,
+  bloomStrength: 0.15,
+  bloomRadius: 0.1,
+  bloomThreshold: 0.5,
   trailOffX: 0.15,
   trailOffY: 0.1,
   trailOffZ: 0.4,
@@ -446,13 +460,31 @@ const GAME_COLORS = [
   { name: 'GREEN',   hex: 0x00ff88, css: '#00ff88' },
 ];
 
-let gameState = 'playing';
+let gameState = 'menu';
 let score = 0;
 let level = 1;
 let shipColorIdx = 0;
 const LEVEL_THRESHOLD = 3000;
 let lives = 3;
-let hitFlash = 0; // countdown timer for screen flash on hit
+let hitFlash = 0;
+
+// ── Streak & multiplier ──
+let streak = 0;          // consecutive obstacles dodged
+let multiplier = 1;      // score multiplier (increases with streak)
+let coinBoostTimer = 0;  // brief speed burst after coin pickup
+
+// ── High Score (localStorage) ──
+const LS_KEY = 'tunnelrunner_highscore';
+let highScore = parseInt(localStorage.getItem(LS_KEY)) || 0;
+
+function saveHighScore() {
+  if (score > highScore) {
+    highScore = score;
+    localStorage.setItem(LS_KEY, highScore);
+    return true; // new record
+  }
+  return false;
+}
 
 // ── HUD ──
 const hudEl = document.createElement('div');
@@ -466,13 +498,43 @@ hudEl.innerHTML = `
   @keyframes hudFlash { 0%{opacity:1} 100%{opacity:0} }
   #hud-hit { display:none; position:fixed; z-index:15; pointer-events:none; font-family:'Courier New',monospace; font-size:36px; font-weight:bold; color:#ff0044; text-shadow:0 0 20px #ff0044, 0 0 40px rgba(255,0,68,0.5); }
   @keyframes hudHitPop { 0%{opacity:1;transform:translate(-50%,-50%) scale(1.5)} 50%{opacity:1;transform:translate(-50%,-80%) scale(1)} 100%{opacity:0;transform:translate(-50%,-120%) scale(0.8)} }
-  #hud-overlay { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.75); z-index:20; align-items:center; justify-content:center; flex-direction:column; font-family:'Courier New',monospace; color:#fff; }
-  #hud-overlay h1 { font-size:60px; margin:0 0 8px; color:#ff0044; text-shadow:0 0 40px #ff0044; }
-  #hud-overlay .sub { font-size:22px; margin:6px 0; }
-  #hud-overlay .blink { animation:hudBlink 1s infinite; font-size:18px; margin-top:24px; opacity:0.8; }
+  #hud-menu { position:fixed; top:0; left:0; width:100%; height:100%; z-index:25; display:flex; align-items:center; justify-content:center; flex-direction:column; font-family:'Courier New',monospace; color:#fff; background:rgba(0,0,0,0.6); }
+  #hud-menu .title { font-size:64px; font-weight:bold; letter-spacing:6px; color:#00ccff; text-shadow:0 0 40px #00ccff, 0 0 80px rgba(0,204,255,0.3); margin-bottom:8px; }
+  #hud-menu .subtitle { font-size:16px; letter-spacing:8px; opacity:0.5; margin-bottom:48px; text-transform:uppercase; }
+  #hud-menu .prompt { font-size:20px; animation:hudBlink 1.2s infinite; opacity:0.9; }
+  #hud-menu .highscore { font-size:16px; margin-top:32px; opacity:0.6; }
+  #hud-overlay { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:20; align-items:center; justify-content:center; flex-direction:column; font-family:'Courier New',monospace; color:#fff; }
+  #hud-overlay h1 { font-size:60px; margin:0 0 16px; color:#ff0044; text-shadow:0 0 40px #ff0044; }
+  #hud-overlay .stats { font-size:20px; margin:6px 0; opacity:0.9; }
+  #hud-overlay .stats span { color:#00ccff; }
+  #hud-overlay .new-record { font-size:24px; color:#ffcc00; text-shadow:0 0 20px #ffcc00; margin:16px 0; animation:hudBlink 0.8s infinite; }
+  #hud-overlay .highscore-line { font-size:16px; opacity:0.5; margin:8px 0; }
+  #hud-overlay .blink { animation:hudBlink 1s infinite; font-size:18px; margin-top:28px; opacity:0.8; }
   @keyframes hudBlink { 0%,100%{opacity:0.8} 50%{opacity:0.2} }
   #hud-lvlup { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); font-family:'Courier New',monospace; font-size:52px; font-weight:bold; z-index:15; pointer-events:none; text-shadow:0 0 40px currentColor; }
   @keyframes hudLvlPop { 0%{opacity:0;transform:translate(-50%,-50%) scale(0.5)} 15%{opacity:1;transform:translate(-50%,-50%) scale(1.3)} 30%{transform:translate(-50%,-50%) scale(1)} 100%{opacity:0;transform:translate(-50%,-50%) translateY(-60px)} }
+  #hud-boost { display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:11; pointer-events:none; }
+  #hud-boost .speed-line { position:absolute; background:linear-gradient(to bottom, transparent, currentColor, transparent); opacity:0; }
+  @keyframes boostLine { 0%{opacity:0;transform:translateY(-10vh) scaleY(0.5)} 20%{opacity:0.8} 100%{opacity:0;transform:translateY(110vh) scaleY(2)} }
+  #hud-boost-flash { display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:11; pointer-events:none; background:radial-gradient(ellipse at center, rgba(255,255,255,0.6) 0%, transparent 70%); }
+  @keyframes boostFlash { 0%{opacity:1} 100%{opacity:0} }
+  #hud-finish { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); font-family:'Courier New',monospace; z-index:16; pointer-events:none; text-align:center; }
+  #hud-finish .finish-text { font-size:42px; font-weight:bold; letter-spacing:6px; text-shadow:0 0 30px currentColor, 0 0 60px currentColor; }
+  #hud-finish .finish-checker { font-size:18px; letter-spacing:2px; opacity:0.7; margin-top:4px; }
+  @keyframes finishPop { 0%{opacity:0;transform:translate(-50%,-50%) scale(2)} 20%{opacity:1;transform:translate(-50%,-50%) scale(1)} 80%{opacity:1;transform:translate(-50%,-50%) scale(1)} 100%{opacity:0;transform:translate(-50%,-50%) scale(0.8)} }
+  #hud-lvlstart { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); font-family:'Courier New',monospace; z-index:16; pointer-events:none; text-align:center; }
+  #hud-lvlstart .start-text { font-size:56px; font-weight:bold; letter-spacing:4px; text-shadow:0 0 40px currentColor; }
+  #hud-lvlstart .start-sub { font-size:20px; opacity:0.7; margin-top:8px; letter-spacing:3px; }
+  @keyframes lvlStartIn { 0%{opacity:0;transform:translate(-50%,-50%) scale(0.3)} 30%{opacity:1;transform:translate(-50%,-50%) scale(1.1)} 50%{transform:translate(-50%,-50%) scale(1)} 100%{opacity:0;transform:translate(-50%,-50%) translateY(-40px)} }
+  #hud-finish-lines { display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:11; pointer-events:none; overflow:hidden; }
+  #hud-finish-lines .checker-bar { position:absolute; height:100%; background:repeating-linear-gradient(0deg, transparent 0px, transparent 20px, currentColor 20px, currentColor 40px); opacity:0; }
+  @keyframes checkerSlide { 0%{opacity:0;transform:translateY(-100%)} 15%{opacity:0.6} 85%{opacity:0.6} 100%{opacity:0;transform:translateY(100%)} }
+  #hud-coin-popup { display:none; position:fixed; z-index:15; pointer-events:none; font-family:'Courier New',monospace; font-size:28px; font-weight:bold; color:#ffcc00; text-shadow:0 0 12px rgba(255,204,0,0.5); }
+  @keyframes coinPop { 0%{opacity:1;transform:translate(-50%,-50%) scale(1.3)} 50%{opacity:1;transform:translate(-50%,-80%) scale(1)} 100%{opacity:0;transform:translate(-50%,-120%) scale(0.8)} }
+  #hud-streak { position:fixed; bottom:60px; left:50%; transform:translateX(-50%); font-family:'Courier New',monospace; font-size:32px; font-weight:bold; z-index:10; pointer-events:none; opacity:0; transition:opacity 0.3s; color:#fff; text-shadow:0 0 15px currentColor; }
+  #hud-streak.active { opacity:1; }
+  #hud-near-miss { display:none; position:fixed; z-index:15; pointer-events:none; font-family:'Courier New',monospace; font-size:22px; font-weight:bold; color:#00ffaa; text-shadow:0 0 10px rgba(0,255,170,0.5); }
+  @keyframes nearMissPop { 0%{opacity:1;transform:translate(-50%,-50%) scale(1.5)} 40%{opacity:1;transform:translate(-50%,-70%) scale(1)} 100%{opacity:0;transform:translate(-50%,-100%) scale(0.8)} }
 </style>
 <div id="hud-bar">
   <div id="hud-score">0</div>
@@ -482,12 +544,29 @@ hudEl.innerHTML = `
 </div>
 <div id="hud-flash"></div>
 <div id="hud-hit">-1</div>
+<div id="hud-coin-popup">+100</div>
+<div id="hud-streak"></div>
+<div id="hud-near-miss">CLOSE!</div>
+<div id="hud-menu">
+  <div class="title">TUNNEL RUNNER</div>
+  <div class="subtitle">Dodge the light</div>
+  <div class="prompt">PRESS SPACE TO START</div>
+  <div class="highscore" id="menu-highscore"></div>
+</div>
 <div id="hud-overlay">
   <h1>GAME OVER</h1>
-  <p class="sub" id="hud-final">Score: 0 — Level 1</p>
+  <p class="stats">Score: <span id="hud-final-score">0</span></p>
+  <p class="stats">Level: <span id="hud-final-level">1</span></p>
+  <div id="hud-new-record" class="new-record" style="display:none">NEW HIGH SCORE!</div>
+  <div id="hud-old-record" class="highscore-line"></div>
   <p class="blink">PRESS SPACE TO RESTART</p>
 </div>
 <div id="hud-lvlup"></div>
+<div id="hud-boost"></div>
+<div id="hud-boost-flash"></div>
+<div id="hud-finish"><div class="finish-text">FINISH</div><div class="finish-checker">&#9632;&#9633;&#9632;&#9633;&#9632;&#9633;&#9632;&#9633;&#9632;&#9633;&#9632;&#9633;&#9632;&#9633;&#9632;&#9633;</div></div>
+<div id="hud-finish-lines"></div>
+<div id="hud-lvlstart"><div class="start-text"></div><div class="start-sub">GET READY</div></div>
 `;
 document.body.appendChild(hudEl);
 
@@ -500,9 +579,43 @@ function updateHUD() {
   badge.textContent = gc.name;
   badge.style.color = gc.css;
   badge.style.borderColor = gc.css;
+
+  // Streak display
+  const streakEl = document.getElementById('hud-streak');
+  if (streak >= 3) {
+    streakEl.textContent = `${streak} STREAK  x${multiplier}`;
+    streakEl.style.color = multiplier >= 5 ? '#ffcc00' : multiplier >= 3 ? '#00ffaa' : '#fff';
+    streakEl.classList.add('active');
+  } else {
+    streakEl.classList.remove('active');
+  }
+}
+
+function dodgedObstacle(wasClose) {
+  streak++;
+  multiplier = 1 + Math.floor(streak / 5);  // x2 at 5, x3 at 10, etc.
+
+  if (wasClose && shipGroup) {
+    // Near-miss bonus
+    const bonus = 50 * multiplier;
+    score += bonus;
+    const screenPos = shipGroup.position.clone().project(camera);
+    const el = document.getElementById('hud-near-miss');
+    el.textContent = `CLOSE! +${bonus}`;
+    el.style.left = ((screenPos.x * 0.5 + 0.5) * innerWidth) + 'px';
+    el.style.top = ((1 - (screenPos.y * 0.5 + 0.5)) * innerHeight - 30) + 'px';
+    el.style.display = 'block';
+    el.style.animation = 'none';
+    el.offsetHeight;
+    el.style.animation = 'nearMissPop 0.5s forwards';
+    setTimeout(() => { el.style.display = 'none'; }, 500);
+  }
+  updateHUD();
 }
 
 function hitObstacle() {
+  streak = 0;
+  multiplier = 1;
   lives--;
   if (lives <= 0) {
     showGameOver();
@@ -535,42 +648,162 @@ function hitObstacle() {
 
 function showGameOver() {
   gameState = 'dead';
-  document.getElementById('hud-final').textContent = `Score: ${score} — Level ${level}`;
+  const isNewRecord = saveHighScore();
+  document.getElementById('hud-final-score').textContent = score;
+  document.getElementById('hud-final-level').textContent = level;
+  document.getElementById('hud-new-record').style.display = isNewRecord ? 'block' : 'none';
+  document.getElementById('hud-old-record').textContent = isNewRecord ? '' : `Best: ${highScore}`;
   document.getElementById('hud-overlay').style.display = 'flex';
 }
 
 function showLevelUp() {
-  const el = document.getElementById('hud-lvlup');
   const gc = GAME_COLORS[shipColorIdx];
-  el.textContent = `LEVEL ${level}`;
-  el.style.color = gc.css;
-  el.style.display = 'block';
-  el.style.animation = 'none';
-  el.offsetHeight; // reflow
-  el.style.animation = 'hudLvlPop 2s forwards';
-  setTimeout(() => { el.style.display = 'none'; }, 2000);
+
+  // ── Phase 1: FINISH LINE ──
+  transitionPhase = 'finish';
+  transitionTimer = FINISH_DURATION;
+
+  // "FINISH" banner
+  const finishEl = document.getElementById('hud-finish');
+  finishEl.style.color = gc.css;
+  finishEl.style.display = 'block';
+  finishEl.style.animation = 'none';
+  finishEl.offsetHeight;
+  finishEl.style.animation = `finishPop ${FINISH_DURATION}s forwards`;
+  setTimeout(() => { finishEl.style.display = 'none'; }, FINISH_DURATION * 1000);
+
+  // Checker bars sliding past on edges
+  const checkerEl = document.getElementById('hud-finish-lines');
+  checkerEl.innerHTML = '';
+  checkerEl.style.display = 'block';
+  for (let side = 0; side < 2; side++) {
+    const bar = document.createElement('div');
+    bar.className = 'checker-bar';
+    bar.style.color = gc.css;
+    bar.style.width = '40px';
+    bar.style[side === 0 ? 'left' : 'right'] = '0';
+    bar.style.animation = `checkerSlide ${FINISH_DURATION}s linear forwards`;
+    checkerEl.appendChild(bar);
+  }
+  setTimeout(() => { checkerEl.style.display = 'none'; }, FINISH_DURATION * 1000);
+
+  // White flash
+  const flash = document.getElementById('hud-boost-flash');
+  flash.style.display = 'block';
+  flash.style.animation = 'none';
+  flash.offsetHeight;
+  flash.style.animation = 'boostFlash 0.8s forwards';
+  setTimeout(() => { flash.style.display = 'none'; }, 800);
+
+  // ── Phase 2: BOOST ZONE (after finish) ──
+  setTimeout(() => {
+    if (transitionPhase !== 'finish') return;
+    transitionPhase = 'boost';
+    transitionTimer = BOOST_DURATION;
+
+    // Speed lines overlay
+    const boostEl = document.getElementById('hud-boost');
+    boostEl.innerHTML = '';
+    boostEl.style.display = 'block';
+    const lineCount = 30;
+    for (let i = 0; i < lineCount; i++) {
+      const line = document.createElement('div');
+      line.className = 'speed-line';
+      line.style.left = (Math.random() * 100) + '%';
+      line.style.width = (1 + Math.random() * 3) + 'px';
+      line.style.height = (15 + Math.random() * 30) + 'vh';
+      line.style.color = gc.css;
+      line.style.animation = `boostLine ${0.4 + Math.random() * 0.6}s linear ${Math.random() * BOOST_DURATION}s infinite`;
+      boostEl.appendChild(line);
+    }
+    setTimeout(() => { boostEl.style.display = 'none'; }, BOOST_DURATION * 1000);
+
+    // ── Phase 3: LEVEL START (after boost) ──
+    setTimeout(() => {
+      if (transitionPhase !== 'boost') return;
+      transitionPhase = 'start';
+      transitionTimer = START_DURATION;
+
+      // "LEVEL X" start banner
+      const startEl = document.getElementById('hud-lvlstart');
+      startEl.querySelector('.start-text').textContent = `LEVEL ${level}`;
+      startEl.style.color = gc.css;
+      startEl.style.display = 'block';
+      startEl.style.animation = 'none';
+      startEl.offsetHeight;
+      startEl.style.animation = `lvlStartIn ${START_DURATION}s forwards`;
+      setTimeout(() => {
+        startEl.style.display = 'none';
+        transitionPhase = 'none';
+        transitionTimer = 0;
+        spawnSafe = 1.5; // grace period after level transition
+      }, START_DURATION * 1000);
+    }, BOOST_DURATION * 1000);
+
+  }, FINISH_DURATION * 1000);
 }
 
 let spawnSafe = 0; // grace period after restart (seconds)
 
-function restartGame() {
-  gameState = 'playing';
+// ── Level transition state ──
+// Phases: 'none' → 'finish' (1.5s) → 'boost' (2.5s, no obstacles) → 'start' (1.5s) → 'none'
+let transitionPhase = 'none';
+let transitionTimer = 0;
+const FINISH_DURATION = 1.5;
+const BOOST_DURATION = 2.5;
+const START_DURATION = 1.5;
+let boostSpeedMul = 1.0;
+let boostFovTarget = 85;
+let boostBloomTarget = 0.15;
+let targetHue = 0;
+
+function resetGameState() {
   score = 0;
   level = 1;
   lives = 3;
   shipColorIdx = 0;
   progress = 0.0;
   rollAngle = 0;
-  spawnSafe = 3.0; // 3 seconds of invincibility after restart
+  spawnSafe = 3.0;
+  streak = 0;
+  multiplier = 1;
+  coinBoostTimer = 0;
+  transitionPhase = 'none';
+  transitionTimer = 0;
+  boostSpeedMul = 1.0;
+  boostFovTarget = 85;
+  boostBloomTarget = 0.15;
+  targetHue = 0;
+  tubeMat.uniforms.uHue.value = 0;
+  document.getElementById('hud-boost').style.display = 'none';
+  document.getElementById('hud-finish').style.display = 'none';
+  document.getElementById('hud-finish-lines').style.display = 'none';
+  document.getElementById('hud-lvlstart').style.display = 'none';
   document.getElementById('hud-overlay').style.display = 'none';
-  // Regenerate obstacles so spawn area is always clear
   generateObstacles();
+  generateCoins();
   obstacles.forEach(o => { o.lastTd = tDist(0.0, o.t); });
   trail1.points.length = 0;
   trail2.points.length = 0;
   updateHUD();
 }
 
+function startGame() {
+  document.getElementById('hud-menu').style.display = 'none';
+  document.getElementById('hud-bar').style.display = 'flex';
+  resetGameState();
+  gameState = 'playing';
+}
+
+function restartGame() {
+  resetGameState();
+  gameState = 'playing';
+}
+
+// ── Initial menu state ──
+document.getElementById('hud-bar').style.display = 'none';
+const menuHs = document.getElementById('menu-highscore');
+if (highScore > 0) menuHs.textContent = `Best: ${highScore}`;
 updateHUD();
 
 // ═══════════════════════════════════════════════════
@@ -579,70 +812,85 @@ updateHUD();
 function createCrystalShip() {
   const group = new THREE.Group();
 
-  // Main body — elongated octahedron (diamond shape)
+  // ── Main fuselage — sleek pointed body ──
   const bodyGeo = new THREE.BufferGeometry();
   const v = [
-    // Tip front (nose)
-     0,    0,   -1.8,
-    // Top
-     0,    0.45, 0,
-    // Right
-     0.55, 0,    0,
-    // Bottom
-     0,   -0.3,  0,
-    // Left
-    -0.55, 0,    0,
-    // Tail
-     0,    0,    1.0,
-    // Wing tips
-     1.2, -0.05, 0.6,
-    -1.2, -0.05, 0.6,
+    // 0: Nose (sharp front)
+     0,     0,    -2.2,
+    // 1: Upper ridge
+     0,     0.35,  0,
+    // 2: Right body
+     0.4,   0,     0,
+    // 3: Lower ridge
+     0,    -0.2,   0,
+    // 4: Left body
+    -0.4,   0,     0,
+    // 5: Tail center
+     0,     0.05,  0.9,
+    // 6: Right wing tip (swept back)
+     1.4,  -0.08,  0.7,
+    // 7: Left wing tip (swept back)
+    -1.4,  -0.08,  0.7,
+    // 8: Right wing root
+     0.4,  -0.05,  0.3,
+    // 9: Left wing root
+    -0.4,  -0.05,  0.3,
+    // 10: Right fin tip
+     0.5,   0.35,  0.8,
+    // 11: Left fin tip
+    -0.5,   0.35,  0.8,
   ];
   const idx = [
-    // Nose to body
+    // Nose cone (4 faces)
     0,1,2,  0,2,3,  0,3,4,  0,4,1,
-    // Body to tail
+    // Body to tail (4 faces)
     5,2,1,  5,3,2,  5,4,3,  5,1,4,
-    // Right wing: body-right, wing-tip, tail
-    2,6,5,  2,3,6,  3,5,6,
-    // Left wing: body-left, wing-tip, tail
-    4,5,7,  4,7,3,  3,7,5,
+    // Right wing (2 triangles)
+    8,6,5,  8,3,6,
+    // Left wing (2 triangles)
+    9,5,7,  9,7,3,
+    // Right dorsal fin
+    1,10,5,  10,2,5,
+    // Left dorsal fin
+    1,5,11,  11,5,4,
   ];
   bodyGeo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
   bodyGeo.setIndex(idx);
   bodyGeo.computeVertexNormals();
 
+  // Solid metallic body — minimal emissive
   const bodyMat = new THREE.MeshStandardMaterial({
-    color: 0x88ffcc,
-    emissive: 0x88ffcc,
-    emissiveIntensity: 0.6,
-    metalness: 0.8,
-    roughness: 0.2,
-    transparent: true,
-    opacity: 0.85,
+    color: 0xcceeee,
+    emissive: 0x112222,
+    emissiveIntensity: 0.05,
+    metalness: 0.95,
+    roughness: 0.15,
+    transparent: false,
     side: THREE.DoubleSide,
     fog: false,
     envMap: envRT,
-    envMapIntensity: 2.0,
+    envMapIntensity: 1.2,
   });
   const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
   group.add(bodyMesh);
 
-  // Neon edge wireframe
-  const edgeGeo = new THREE.EdgesGeometry(bodyGeo, 15);
+  // Subtle edge wireframe
+  const edgeGeo = new THREE.EdgesGeometry(bodyGeo, 20);
   const edgeMat = new THREE.LineBasicMaterial({
-    color: 0xaaffee,
+    color: 0x66aaaa,
     fog: false,
     linewidth: 1,
+    transparent: true,
+    opacity: 0.4,
   });
   group.add(new THREE.LineSegments(edgeGeo, edgeMat));
 
-  // Small engine glow at tail
-  const glowGeo = new THREE.SphereGeometry(0.15, 8, 8);
+  // Small engine exhaust at tail
+  const glowGeo = new THREE.SphereGeometry(0.08, 8, 8);
   const glowMat = new THREE.MeshBasicMaterial({
     color: 0x00ffaa,
     transparent: true,
-    opacity: 0.9,
+    opacity: 0.6,
     fog: false,
   });
   const glow = new THREE.Mesh(glowGeo, glowMat);
@@ -685,8 +933,17 @@ function generateObstacles() {
   obstacles.length = 0;
 
   const count = 40;
+  const tPositions = [];
   for (let i = 0; i < count; i++) {
     const t = 0.08 + (i / count) * 0.87;
+    tPositions.push(t);
+    // ~15% chance of a double obstacle (second one close behind)
+    if (Math.random() < 0.15) {
+      tPositions.push(t + 0.012);
+    }
+  }
+  for (let i = 0; i < tPositions.length; i++) {
+    const t = tPositions[i] % 1.0;
     const patIdx = Math.floor(Math.random() * OBS_PATTERNS.length);
     const colIdx = Math.floor(Math.random() * GAME_COLORS.length);
     const gc = GAME_COLORS[colIdx];
@@ -744,13 +1001,14 @@ function generateObstacles() {
     const mat = new THREE.MeshStandardMaterial({
       color: gc.hex,
       emissive: gc.hex,
-      emissiveIntensity: 0.6,
-      metalness: 0.4,
-      roughness: 0.3,
+      emissiveIntensity: 0.05,
+      metalness: 0.0,
+      roughness: 1.0,
       transparent: true,
       opacity: 0.85,
       side: THREE.DoubleSide,
       fog: true,
+      envMapIntensity: 0.0,
     });
 
     const mesh = new THREE.Mesh(geo, mat);
@@ -783,17 +1041,99 @@ function generateObstacles() {
       gapDirs.push(gapDir);
     }
 
+    // ~20% chance of rotating obstacle
+    const spinning = Math.random() < 0.2;
+    const spinSpeed = spinning ? (0.3 + Math.random() * 0.5) * (Math.random() > 0.5 ? 1 : -1) : 0;
+
     obstacles.push({
       t, colIdx, mesh,
-      gapDirs,                          // world-space direction of each gap center
-      gapHalfCos: Math.cos(sliceAngle / 2 - 0.05), // cos of half-gap angle (with tolerance)
+      gapDirs,
+      gapHalfCos: Math.cos(sliceAngle / 2 - 0.05),
       innerR: pat.innerR,
       pattern: pat.name,
+      spinning,
+      spinSpeed,          // radians per second
+      sliceAngle,         // needed to recalculate gapDirs
+      gapIndices: [...gapIndices],
     });
   }
 }
 
 generateObstacles();
+
+// ═══════════════════════════════════════════════════
+// COINS — collectible pickups placed in obstacle gaps
+// ═══════════════════════════════════════════════════
+const coins = [];
+const COIN_RADIUS = 0.6;
+const COIN_VALUE = 100;
+const COIN_COLLECT_DIST = 2.5; // world-space distance for pickup
+
+// Shared coin geometry and material
+const coinGeo = new THREE.TorusGeometry(COIN_RADIUS, 0.15, 8, 16);
+const coinMat = new THREE.MeshStandardMaterial({
+  color: 0xffcc00,
+  emissive: 0x332200,
+  emissiveIntensity: 0.1,
+  metalness: 0.9,
+  roughness: 0.2,
+  fog: false,
+});
+
+function generateCoins() {
+  coins.forEach(c => { if (c.mesh) scene.remove(c.mesh); });
+  coins.length = 0;
+
+  for (const obs of obstacles) {
+    // ~50% chance to spawn a coin in each gap
+    if (Math.random() > 0.5) continue;
+
+    // Pick a random gap direction for this obstacle
+    if (obs.gapDirs.length === 0) continue;
+    const gapDir = obs.gapDirs[Math.floor(Math.random() * obs.gapDirs.length)];
+
+    // Position coin in the gap at the ship's riding radius
+    const center = curve.getPointAt(obs.t);
+    const coinPos = center.clone().addScaledVector(gapDir, TUBE_R - 1.5);
+
+    const mesh = new THREE.Mesh(coinGeo, coinMat.clone());
+    mesh.position.copy(coinPos);
+
+    // Orient coin to face roughly along the tunnel
+    const tan = curve.getTangentAt(obs.t).normalize();
+    mesh.lookAt(coinPos.clone().add(tan));
+
+    mesh.visible = false;
+    scene.add(mesh);
+
+    coins.push({ t: obs.t, mesh, collected: false });
+  }
+}
+
+generateCoins();
+
+function collectCoin(coin) {
+  coin.collected = true;
+  coin.mesh.visible = false;
+  const value = COIN_VALUE * multiplier;
+  score += value;
+  coinBoostTimer = 0.5; // brief speed burst
+
+  // "+X" popup
+  if (shipGroup) {
+    const screenPos = shipGroup.position.clone().project(camera);
+    const popup = document.getElementById('hud-coin-popup');
+    popup.textContent = `+${value}`;
+    popup.style.left = ((screenPos.x * 0.5 + 0.5) * innerWidth) + 'px';
+    popup.style.top = ((1 - (screenPos.y * 0.5 + 0.5)) * innerHeight) + 'px';
+    popup.style.display = 'block';
+    popup.style.animation = 'none';
+    popup.offsetHeight;
+    popup.style.animation = 'coinPop 0.6s forwards';
+    setTimeout(() => { popup.style.display = 'none'; }, 600);
+  }
+  updateHUD();
+}
 
 // ═══════════════════════════════════════════════════
 // OBSTACLE DESTRUCTION ANIMATION
@@ -831,12 +1171,13 @@ function explodeObstacle(obs) {
     const mat = new THREE.MeshStandardMaterial({
       color,
       emissive,
-      emissiveIntensity: 1.0,
-      metalness: 0.4,
-      roughness: 0.3,
+      emissiveIntensity: 0.1,
+      metalness: 0.0,
+      roughness: 1.0,
       transparent: true,
       opacity: 1.0,
       side: THREE.DoubleSide,
+      envMapIntensity: 0.0,
     });
 
     const frag = new THREE.Mesh(geo, mat);
@@ -972,8 +1313,7 @@ function createTrailMesh(color) {
       uniform vec3 uColor;
       varying float vAlpha;
       void main() {
-        // Bright core + glow
-        gl_FragColor = vec4(uColor * (1.0 + vAlpha), vAlpha);
+        gl_FragColor = vec4(uColor * (0.7 + vAlpha * 0.3), vAlpha * 0.8);
       }
     `,
   });
@@ -1044,6 +1384,7 @@ const keys = {};
 
 document.addEventListener('keydown', e => {
   keys[e.code] = true;
+  if (e.code === 'Space' && gameState === 'menu') startGame();
   if (e.code === 'Space' && gameState === 'dead') restartGame();
   if (e.code === 'KeyP' || e.code === 'Escape') {
     if (gameState === 'playing') { gameState = 'paused'; }
@@ -1132,6 +1473,38 @@ function animate() {
 
   tubeMat.uniforms.uTime.value = t;
 
+  // ── Level transition update ──
+  if (transitionPhase === 'finish') {
+    // Slight slowdown at finish line
+    boostSpeedMul = 0.6;
+    boostFovTarget = 80;
+    boostBloomTarget = 0.5;
+  } else if (transitionPhase === 'boost') {
+    transitionTimer -= dt;
+    const p = Math.max(0, transitionTimer / BOOST_DURATION);
+    boostSpeedMul = 1.0 + 1.5 * p;
+    boostFovTarget = 85 + 25 * p;
+    boostBloomTarget = 0.15 + 0.6 * p;
+  } else if (transitionPhase === 'start') {
+    boostSpeedMul = 1.0;
+    boostFovTarget = 85;
+    boostBloomTarget = 0.25;
+  } else {
+    boostSpeedMul = 1.0;
+    boostFovTarget = 85;
+    boostBloomTarget = 0.15;
+  }
+  // Smoothly interpolate FOV and bloom
+  camera.fov += (boostFovTarget - camera.fov) * Math.min(1, dt * 5);
+  camera.updateProjectionMatrix();
+  bloomPass.strength += (boostBloomTarget - bloomPass.strength) * Math.min(1, dt * 5);
+
+  // Smooth tunnel hue transition between levels
+  const currentHue = tubeMat.uniforms.uHue.value;
+  tubeMat.uniforms.uHue.value += (targetHue - currentHue) * Math.min(1, dt * 2);
+
+  const inTransition = transitionPhase !== 'none';
+
   // ── Input + progress only when playing ──
   if (gameState === 'playing') {
     let inputR = 0;
@@ -1139,7 +1512,11 @@ function animate() {
     if (keys['ArrowRight'] || keys['KeyD']) inputR += 1;
     rollAngle += inputR * rollSpeed * dt;
 
-    progress += settings.speed * dt * 0.1;
+    // Speed increases per level + brief boost from coin pickups
+    const levelSpeed = 1.0 + (level - 1) * 0.08;
+    if (coinBoostTimer > 0) coinBoostTimer -= dt;
+    const coinBoost = coinBoostTimer > 0 ? 1.3 : 1.0;
+    progress += settings.speed * boostSpeedMul * levelSpeed * coinBoost * dt * 0.1;
     progress %= 1.0;
   }
 
@@ -1210,52 +1587,101 @@ function animate() {
   for (const obs of obstacles) {
     const td = tDist(progress, obs.t);
     const absTd = Math.abs(td);
-    const vis = absTd < 0.08;
+    const vis = absTd < 0.08 && !inTransition;
 
-    // Show/hide obstacle mesh
+    // Show/hide obstacle mesh (hidden during level transitions)
     const isMatch = obs.colIdx === shipColorIdx;
     obs.mesh.visible = vis;
     if (vis) {
       obs.mesh.material.opacity = isMatch ? 0.1 : 0.85;
-      obs.mesh.material.emissiveIntensity = isMatch ? 0.1 : 0.6;
-    }
+      obs.mesh.material.emissiveIntensity = isMatch ? 0.02 : 0.05;
 
-    // Collision: when ship crosses obstacle plane, check if it's in a gap
-    if (gameState === 'playing') {
-      const crossed = obs.lastTd !== undefined && obs.lastTd <= 0 && td > 0;
-      const inRange = absTd < 0.003;
-      if (spawnSafe <= 0 && (crossed || (inRange && !obs.checked))) {
-        if (!isMatch && shipGroup) {
-          const obsCenter = curve.getPointAt(obs.t);
-          const obsTan = curve.getTangentAt(obs.t).normalize();
-
-          // Ship direction from tunnel center (projected onto cross-section)
-          const rel = shipGroup.position.clone().sub(obsCenter);
-          const alongTunnel = obsTan.clone().multiplyScalar(rel.dot(obsTan));
-          const shipDir = rel.clone().sub(alongTunnel).normalize();
-          const shipDist = rel.clone().sub(alongTunnel).length();
-
-          // Check if ship direction aligns with ANY gap direction
-          let inGap = false;
-          for (const gapDir of obs.gapDirs) {
-            if (shipDir.dot(gapDir) > obs.gapHalfCos) {
-              inGap = true;
-              break;
-            }
-          }
-
-          // Also safe if inside the inner hole
-          const inCenter = shipDist < obs.innerR + 1.0;
-
-          if (!inGap && !inCenter) {
-            explodeObstacle(obs);
-            hitObstacle();
-          }
-          obs.checked = true;
+      // Spin rotating obstacles and recalculate gap directions
+      if (obs.spinning && gameState === 'playing') {
+        obs.mesh.rotateZ(obs.spinSpeed * dt);
+        obs.mesh.updateMatrixWorld(true);
+        obs.gapDirs.length = 0;
+        for (const gi of obs.gapIndices) {
+          const gapCenterAngle = (gi + 0.5) * obs.sliceAngle;
+          const gapDir = new THREE.Vector3(
+            Math.cos(gapCenterAngle),
+            Math.sin(gapCenterAngle),
+            0
+          ).transformDirection(obs.mesh.matrixWorld).normalize();
+          obs.gapDirs.push(gapDir);
         }
       }
-      if (absTd > 0.01) obs.checked = false;
+    }
+
+    // Collision: check EVERY frame while ship is near obstacle
+    if (gameState === 'playing' && !inTransition) {
+      // td < 0 = approaching, td > 0 = passed; generous before, tight after
+      const inRange = td > -0.005 && td < 0.0015;
+      if (spawnSafe <= 0 && inRange && !obs.hit && !isMatch && shipGroup) {
+        const obsCenter = curve.getPointAt(obs.t);
+        const obsTan = curve.getTangentAt(obs.t).normalize();
+
+        // Ship direction from tunnel center (projected onto cross-section)
+        const rel = shipGroup.position.clone().sub(obsCenter);
+        const alongTunnel = obsTan.clone().multiplyScalar(rel.dot(obsTan));
+        const shipDir = rel.clone().sub(alongTunnel).normalize();
+        const shipDist = rel.clone().sub(alongTunnel).length();
+
+        // Check if ship direction aligns with ANY gap direction
+        let inGap = false;
+        let bestGapDot = -1;
+        for (const gapDir of obs.gapDirs) {
+          const d = shipDir.dot(gapDir);
+          if (d > obs.gapHalfCos) {
+            inGap = true;
+          }
+          if (d > bestGapDot) bestGapDot = d;
+        }
+
+        // Also safe if inside the inner hole
+        const inCenter = shipDist < obs.innerR + 1.0;
+
+        if (!inGap && !inCenter) {
+          explodeObstacle(obs);
+          hitObstacle();
+          obs.hit = true;
+        } else {
+          // Track how close the ship was to the gap edge for near-miss detection
+          obs._bestGapDot = bestGapDot;
+        }
+      }
+
+      // Dodge detection: ship has passed the obstacle without being hit
+      if (td > 0.003 && !obs.hit && !obs.dodged && !isMatch) {
+        const wasClose = obs._bestGapDot !== undefined &&
+          obs._bestGapDot < obs.gapHalfCos + 0.15 && obs._bestGapDot > obs.gapHalfCos - 0.1;
+        dodgedObstacle(wasClose);
+        obs.dodged = true;
+      }
+
+      // Reset flags once ship is far away
+      if (absTd > 0.02) { obs.hit = false; obs.dodged = false; obs._bestGapDot = undefined; }
       obs.lastTd = td;
+    }
+  }
+
+  // ── Coins visibility + collection ──
+  for (const coin of coins) {
+    if (coin.collected) continue;
+    const td = tDist(progress, coin.t);
+    const absTd = Math.abs(td);
+    const vis = absTd < 0.08 && !inTransition;
+    coin.mesh.visible = vis;
+    if (vis) {
+      // Spin the coin
+      coin.mesh.rotation.z += dt * 3.0;
+    }
+    // Collection check
+    if (gameState === 'playing' && absTd < 0.005 && shipGroup) {
+      const dist = shipGroup.position.distanceTo(coin.mesh.position);
+      if (dist < COIN_COLLECT_DIST) {
+        collectCoin(coin);
+      }
     }
   }
 
@@ -1266,6 +1692,7 @@ function animate() {
     if (newLevel > level) {
       level = newLevel;
       shipColorIdx = (level - 1) % GAME_COLORS.length;
+      targetHue = (level - 1) * 1.2; // ~69° per level, cycles through colors
       showLevelUp();
     }
     updateHUD();
