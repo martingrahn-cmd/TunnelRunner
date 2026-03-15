@@ -464,7 +464,8 @@ let gameState = 'menu';
 let score = 0;
 let level = 1;
 let shipColorIdx = 0;
-const LEVEL_THRESHOLD = 3000;
+const LEVEL_DURATION = 25; // seconds per level
+let levelTimer = LEVEL_DURATION;
 let lives = 3;
 let hitFlash = 0;
 
@@ -484,6 +485,225 @@ function saveHighScore() {
     return true; // new record
   }
   return false;
+}
+
+// ═══════════════════════════════════════════════════
+// PERSISTENT COIN WALLET
+// ═══════════════════════════════════════════════════
+const LS_WALLET = 'tunnelrunner_wallet';
+let wallet = parseInt(localStorage.getItem(LS_WALLET)) || 0;
+let sessionCoins = 0; // coins earned this run
+
+function saveWallet() { localStorage.setItem(LS_WALLET, wallet); }
+
+// ═══════════════════════════════════════════════════
+// MISSION SYSTEM — 3 active missions at a time
+// ═══════════════════════════════════════════════════
+const LS_MISSIONS = 'tunnelrunner_missions';
+const LS_MISSIONS_DONE = 'tunnelrunner_missions_done';
+
+const MISSION_DEFS = [
+  // ── Reach level X ──
+  { id: 'reach_lv3',  desc: 'Reach Level 3',         type: 'level',  target: 3,  reward: 50 },
+  { id: 'reach_lv5',  desc: 'Reach Level 5',         type: 'level',  target: 5,  reward: 100 },
+  { id: 'reach_lv8',  desc: 'Reach Level 8',         type: 'level',  target: 8,  reward: 200 },
+  { id: 'reach_lv12', desc: 'Reach Level 12',        type: 'level',  target: 12, reward: 400 },
+  // ── Dodge X obstacles in a row ──
+  { id: 'streak_10',  desc: '10 dodges in a row',    type: 'streak', target: 10,  reward: 50 },
+  { id: 'streak_20',  desc: '20 dodges in a row',    type: 'streak', target: 20,  reward: 100 },
+  { id: 'streak_35',  desc: '35 dodges in a row',    type: 'streak', target: 35,  reward: 200 },
+  { id: 'streak_50',  desc: '50 dodges in a row',    type: 'streak', target: 50,  reward: 400 },
+  // ── Collect X coins in one run ──
+  { id: 'coins_20',   desc: 'Collect 20 coins',      type: 'coins',  target: 20,  reward: 75 },
+  { id: 'coins_50',   desc: 'Collect 50 coins',      type: 'coins',  target: 50,  reward: 150 },
+  { id: 'coins_100',  desc: 'Collect 100 coins',     type: 'coins',  target: 100, reward: 300 },
+  // ── Score X points ──
+  { id: 'score_5k',   desc: 'Score 5,000 points',    type: 'score',  target: 5000,  reward: 50 },
+  { id: 'score_15k',  desc: 'Score 15,000 points',   type: 'score',  target: 15000, reward: 150 },
+  { id: 'score_30k',  desc: 'Score 30,000 points',   type: 'score',  target: 30000, reward: 300 },
+  // ── Near misses ──
+  { id: 'close_5',    desc: '5 near misses',         type: 'close',  target: 5,  reward: 75 },
+  { id: 'close_15',   desc: '15 near misses',        type: 'close',  target: 15, reward: 200 },
+  // ── No damage ──
+  { id: 'nodmg_lv3',  desc: 'Reach Level 3 no damage', type: 'nodmg_level', target: 3, reward: 200 },
+  { id: 'nodmg_lv5',  desc: 'Reach Level 5 no damage', type: 'nodmg_level', target: 5, reward: 500 },
+];
+
+let completedMissionIds = JSON.parse(localStorage.getItem(LS_MISSIONS_DONE) || '[]');
+let activeMissions = JSON.parse(localStorage.getItem(LS_MISSIONS) || 'null');
+
+// Per-run tracking
+let runCoinsCollected = 0;
+let runNearMisses = 0;
+let runMaxStreak = 0;
+let runDamageTaken = false;
+
+function getAvailableMissions() {
+  return MISSION_DEFS.filter(m => !completedMissionIds.includes(m.id));
+}
+
+function pickNewMissions() {
+  const available = getAvailableMissions();
+  const activeIds = activeMissions ? activeMissions.map(m => m.id) : [];
+  const pool = available.filter(m => !activeIds.includes(m.id));
+
+  // Fill up to 3
+  const needed = 3 - (activeMissions ? activeMissions.length : 0);
+  const picked = [];
+  const shuffled = pool.sort(() => Math.random() - 0.5);
+  for (let i = 0; i < Math.min(needed, shuffled.length); i++) {
+    picked.push({ id: shuffled[i].id, progress: 0 });
+  }
+  return picked;
+}
+
+function initMissions() {
+  if (!activeMissions || activeMissions.length === 0) {
+    activeMissions = [];
+    const picks = pickNewMissions();
+    activeMissions.push(...picks);
+  }
+  // Fill if less than 3
+  while (activeMissions.length < 3) {
+    const picks = pickNewMissions();
+    if (picks.length === 0) break;
+    activeMissions.push(...picks);
+  }
+  saveMissions();
+}
+
+function saveMissions() {
+  localStorage.setItem(LS_MISSIONS, JSON.stringify(activeMissions));
+  localStorage.setItem(LS_MISSIONS_DONE, JSON.stringify(completedMissionIds));
+}
+
+function getMissionDef(id) { return MISSION_DEFS.find(m => m.id === id); }
+
+function checkMissions() {
+  if (!activeMissions) return;
+  const completed = [];
+
+  for (const m of activeMissions) {
+    const def = getMissionDef(m.id);
+    if (!def) continue;
+
+    let current = 0;
+    switch (def.type) {
+      case 'level': current = level; break;
+      case 'streak': current = runMaxStreak; break;
+      case 'coins': current = runCoinsCollected; break;
+      case 'score': current = score; break;
+      case 'close': current = runNearMisses; break;
+      case 'nodmg_level': current = runDamageTaken ? 0 : level; break;
+    }
+    m.progress = Math.min(current, def.target);
+
+    if (current >= def.target) {
+      completed.push(m);
+    }
+  }
+
+  for (const m of completed) {
+    const def = getMissionDef(m.id);
+    completedMissionIds.push(m.id);
+    wallet += def.reward;
+    saveWallet();
+    activeMissions = activeMissions.filter(a => a.id !== m.id);
+    showMissionComplete(def);
+  }
+
+  if (completed.length > 0) {
+    // Fill new missions
+    const picks = pickNewMissions();
+    activeMissions.push(...picks);
+    saveMissions();
+  }
+}
+
+function showMissionComplete(def) {
+  const el = document.getElementById('hud-mission-complete');
+  el.querySelector('.mc-text').textContent = def.desc;
+  el.querySelector('.mc-reward').textContent = `+${def.reward}`;
+  el.style.display = 'block';
+  el.style.animation = 'none';
+  el.offsetHeight;
+  el.style.animation = 'missionPop 2s forwards';
+  setTimeout(() => { el.style.display = 'none'; }, 2000);
+}
+
+function resetRunTracking() {
+  runCoinsCollected = 0;
+  runNearMisses = 0;
+  runMaxStreak = 0;
+  runDamageTaken = false;
+  sessionCoins = 0;
+}
+
+initMissions();
+
+// ═══════════════════════════════════════════════════
+// SHOP — unlockable ships and trails
+// ═══════════════════════════════════════════════════
+const LS_SHOP = 'tunnelrunner_shop';
+const LS_EQUIPPED = 'tunnelrunner_equipped';
+
+const SHOP_ITEMS = [
+  // Ships
+  { id: 'ship_default', name: 'Crystal',     type: 'ship', cost: 0,   color: 0x00ccff, desc: 'Default ship' },
+  { id: 'ship_fire',    name: 'Inferno',     type: 'ship', cost: 200, color: 0xff4422, desc: 'Blazing red fighter' },
+  { id: 'ship_toxic',   name: 'Venom',       type: 'ship', cost: 300, color: 0x44ff00, desc: 'Toxic green racer' },
+  { id: 'ship_gold',    name: 'Gilded',      type: 'ship', cost: 500, color: 0xffcc00, desc: 'Pure gold luxury' },
+  { id: 'ship_void',    name: 'Void',        type: 'ship', cost: 800, color: 0xaa44ff, desc: 'Dark energy vessel' },
+  // Trails
+  { id: 'trail_default', name: 'Neon',       type: 'trail', cost: 0,   colors: [0x00ccff, 0xff00aa], desc: 'Default trail' },
+  { id: 'trail_fire',    name: 'Fire',       type: 'trail', cost: 150, colors: [0xff4400, 0xffaa00], desc: 'Flame trails' },
+  { id: 'trail_ice',     name: 'Frost',      type: 'trail', cost: 250, colors: [0x88ddff, 0xffffff], desc: 'Icy cold trails' },
+  { id: 'trail_toxic',   name: 'Acid',       type: 'trail', cost: 300, colors: [0x44ff00, 0x00ff88], desc: 'Toxic acid trails' },
+  { id: 'trail_royal',   name: 'Royal',      type: 'trail', cost: 500, colors: [0xaa44ff, 0xff44aa], desc: 'Purple majesty' },
+  { id: 'trail_gold',    name: 'Golden',     type: 'trail', cost: 700, colors: [0xffcc00, 0xffee88], desc: 'Liquid gold' },
+];
+
+let ownedItems = JSON.parse(localStorage.getItem(LS_SHOP) || '["ship_default","trail_default"]');
+let equipped = JSON.parse(localStorage.getItem(LS_EQUIPPED) || '{"ship":"ship_default","trail":"trail_default"}');
+
+function saveShop() {
+  localStorage.setItem(LS_SHOP, JSON.stringify(ownedItems));
+  localStorage.setItem(LS_EQUIPPED, JSON.stringify(equipped));
+}
+
+function buyItem(id) {
+  const item = SHOP_ITEMS.find(i => i.id === id);
+  if (!item || ownedItems.includes(id)) return false;
+  if (wallet < item.cost) return false;
+  wallet -= item.cost;
+  ownedItems.push(id);
+  saveWallet();
+  saveShop();
+  return true;
+}
+
+function equipItem(id) {
+  const item = SHOP_ITEMS.find(i => i.id === id);
+  if (!item || !ownedItems.includes(id)) return false;
+  equipped[item.type] = id;
+  saveShop();
+  applyEquipped();
+  return true;
+}
+
+function applyEquipped() {
+  // Apply ship color
+  const shipItem = SHOP_ITEMS.find(i => i.id === equipped.ship);
+  if (shipItem && shipGroup) {
+    shipGroup.userData.bodyMat.color.set(shipItem.color);
+    shipGroup.userData.edgeMat.color.set(shipItem.color);
+  }
+  // Apply trail colors
+  const trailItem = SHOP_ITEMS.find(i => i.id === equipped.trail);
+  if (trailItem) {
+    trail1.mesh.material.uniforms.uColor.value.set(trailItem.colors[0]);
+    trail2.mesh.material.uniforms.uColor.value.set(trailItem.colors[1]);
+  }
 }
 
 // ── HUD ──
@@ -535,6 +755,37 @@ hudEl.innerHTML = `
   #hud-streak.active { opacity:1; }
   #hud-near-miss { display:none; position:fixed; z-index:15; pointer-events:none; font-family:'Courier New',monospace; font-size:22px; font-weight:bold; color:#00ffaa; text-shadow:0 0 10px rgba(0,255,170,0.5); }
   @keyframes nearMissPop { 0%{opacity:1;transform:translate(-50%,-50%) scale(1.5)} 40%{opacity:1;transform:translate(-50%,-70%) scale(1)} 100%{opacity:0;transform:translate(-50%,-100%) scale(0.8)} }
+  #hud-mission-complete { display:none; position:fixed; bottom:120px; left:50%; transform:translateX(-50%); z-index:20; pointer-events:none; font-family:'Courier New',monospace; text-align:center; background:rgba(0,0,0,0.7); border:1px solid #ffcc00; border-radius:8px; padding:12px 24px; }
+  .mc-label { font-size:12px; letter-spacing:3px; color:#ffcc00; opacity:0.8; }
+  .mc-text { font-size:18px; color:#fff; margin:4px 0; }
+  .mc-reward { font-size:22px; font-weight:bold; color:#ffcc00; text-shadow:0 0 10px rgba(255,204,0,0.5); }
+  @keyframes missionPop { 0%{opacity:0;transform:translateX(-50%) translateY(20px)} 10%{opacity:1;transform:translateX(-50%) translateY(0)} 80%{opacity:1;transform:translateX(-50%) translateY(0)} 100%{opacity:0;transform:translateX(-50%) translateY(-20px)} }
+  #hud-wallet { position:fixed; top:50px; right:28px; font-family:'Courier New',monospace; font-size:16px; color:#ffcc00; z-index:10; pointer-events:none; text-shadow:0 0 8px rgba(255,204,0,0.3); }
+  #hud-missions { position:fixed; top:50px; left:28px; font-family:'Courier New',monospace; font-size:13px; color:#aaa; z-index:10; pointer-events:none; line-height:1.8; }
+  .mission-row { display:flex; align-items:center; gap:8px; }
+  .mission-bar { width:60px; height:6px; background:rgba(255,255,255,0.1); border-radius:3px; overflow:hidden; }
+  .mission-fill { height:100%; background:#ffcc00; border-radius:3px; transition:width 0.3s; }
+  .mission-done { color:#ffcc00; }
+  #hud-shop { display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:30; background:rgba(0,0,0,0.92); font-family:'Courier New',monospace; color:#fff; overflow-y:auto; }
+  .shop-inner { max-width:600px; margin:40px auto; padding:0 20px; }
+  .shop-title { font-size:36px; text-align:center; color:#ffcc00; margin-bottom:8px; letter-spacing:4px; }
+  .shop-wallet { text-align:center; font-size:18px; color:#ffcc00; margin-bottom:24px; }
+  .shop-section { font-size:14px; letter-spacing:3px; color:#888; margin:20px 0 10px; border-bottom:1px solid #333; padding-bottom:4px; }
+  .shop-item { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; margin:4px 0; border:1px solid #333; border-radius:6px; cursor:pointer; transition:border-color 0.2s; }
+  .shop-item:hover { border-color:#888; }
+  .shop-item.equipped { border-color:#ffcc00; }
+  .shop-item.locked { opacity:0.5; }
+  .shop-item-left { display:flex; align-items:center; gap:12px; }
+  .shop-swatch { width:20px; height:20px; border-radius:50%; border:2px solid #555; }
+  .shop-item-name { font-size:16px; font-weight:bold; }
+  .shop-item-desc { font-size:12px; color:#888; }
+  .shop-item-price { font-size:14px; color:#ffcc00; font-weight:bold; }
+  .shop-item-owned { font-size:12px; color:#00ff88; }
+  .shop-item-equip { font-size:12px; color:#ffcc00; }
+  .shop-close { position:fixed; top:20px; right:30px; font-size:28px; cursor:pointer; color:#888; z-index:31; }
+  .shop-close:hover { color:#fff; }
+  .menu-shop-btn { cursor:pointer; font-size:16px; margin-top:16px; padding:8px 24px; border:1px solid #ffcc00; color:#ffcc00; background:transparent; font-family:'Courier New',monospace; letter-spacing:2px; border-radius:4px; transition:background 0.2s; }
+  .menu-shop-btn:hover { background:rgba(255,204,0,0.15); }
 </style>
 <div id="hud-bar">
   <div id="hud-score">0</div>
@@ -547,19 +798,33 @@ hudEl.innerHTML = `
 <div id="hud-coin-popup">+100</div>
 <div id="hud-streak"></div>
 <div id="hud-near-miss">CLOSE!</div>
+<div id="hud-mission-complete"><div class="mc-label">MISSION COMPLETE</div><div class="mc-text"></div><div class="mc-reward"></div></div>
+<div id="hud-wallet"></div>
+<div id="hud-missions"></div>
 <div id="hud-menu">
   <div class="title">TUNNEL RUNNER</div>
   <div class="subtitle">Dodge the light</div>
   <div class="prompt">PRESS SPACE TO START</div>
   <div class="highscore" id="menu-highscore"></div>
+  <button class="menu-shop-btn" id="menu-shop-btn">SHOP</button>
 </div>
 <div id="hud-overlay">
   <h1>GAME OVER</h1>
   <p class="stats">Score: <span id="hud-final-score">0</span></p>
   <p class="stats">Level: <span id="hud-final-level">1</span></p>
+  <p class="stats">Coins: <span id="hud-final-coins">0</span></p>
   <div id="hud-new-record" class="new-record" style="display:none">NEW HIGH SCORE!</div>
   <div id="hud-old-record" class="highscore-line"></div>
   <p class="blink">PRESS SPACE TO RESTART</p>
+  <button class="menu-shop-btn" id="gameover-shop-btn" style="margin-top:12px">SHOP</button>
+</div>
+<div id="hud-shop">
+  <div class="shop-close" id="shop-close">&times;</div>
+  <div class="shop-inner">
+    <div class="shop-title">SHOP</div>
+    <div class="shop-wallet" id="shop-wallet"></div>
+    <div id="shop-items"></div>
+  </div>
 </div>
 <div id="hud-lvlup"></div>
 <div id="hud-boost"></div>
@@ -589,14 +854,124 @@ function updateHUD() {
   } else {
     streakEl.classList.remove('active');
   }
+
+  // Wallet
+  document.getElementById('hud-wallet').textContent = `\u2B50 ${wallet}`;
+
+  // Mission progress
+  updateMissionHUD();
+}
+
+function updateMissionHUD() {
+  const el = document.getElementById('hud-missions');
+  if (!activeMissions || activeMissions.length === 0) {
+    el.innerHTML = '';
+    return;
+  }
+  let html = '';
+  for (const m of activeMissions) {
+    const def = getMissionDef(m.id);
+    if (!def) continue;
+    const pct = Math.min(100, (m.progress / def.target) * 100);
+    html += `<div class="mission-row">
+      <span>${def.desc}</span>
+      <div class="mission-bar"><div class="mission-fill" style="width:${pct}%"></div></div>
+      <span style="color:#ffcc00;font-size:11px">\u2B50${def.reward}</span>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderShop() {
+  const container = document.getElementById('shop-items');
+  document.getElementById('shop-wallet').textContent = `\u2B50 ${wallet}`;
+
+  const ships = SHOP_ITEMS.filter(i => i.type === 'ship');
+  const trails = SHOP_ITEMS.filter(i => i.type === 'trail');
+
+  let html = '<div class="shop-section">SHIPS</div>';
+  for (const item of ships) {
+    const owned = ownedItems.includes(item.id);
+    const isEquipped = equipped.ship === item.id;
+    const canBuy = wallet >= item.cost;
+    const cls = isEquipped ? 'shop-item equipped' : owned ? 'shop-item' : canBuy ? 'shop-item' : 'shop-item locked';
+    const colorHex = '#' + item.color.toString(16).padStart(6, '0');
+
+    html += `<div class="${cls}" data-id="${item.id}">
+      <div class="shop-item-left">
+        <div class="shop-swatch" style="background:${colorHex}"></div>
+        <div>
+          <div class="shop-item-name">${item.name}</div>
+          <div class="shop-item-desc">${item.desc}</div>
+        </div>
+      </div>
+      <div>
+        ${isEquipped ? '<span class="shop-item-equip">EQUIPPED</span>' :
+          owned ? '<span class="shop-item-owned">OWNED</span>' :
+          `<span class="shop-item-price">\u2B50 ${item.cost}</span>`}
+      </div>
+    </div>`;
+  }
+
+  html += '<div class="shop-section">TRAILS</div>';
+  for (const item of trails) {
+    const owned = ownedItems.includes(item.id);
+    const isEquipped = equipped.trail === item.id;
+    const canBuy = wallet >= item.cost;
+    const cls = isEquipped ? 'shop-item equipped' : owned ? 'shop-item' : canBuy ? 'shop-item' : 'shop-item locked';
+    const c1 = '#' + item.colors[0].toString(16).padStart(6, '0');
+    const c2 = '#' + item.colors[1].toString(16).padStart(6, '0');
+
+    html += `<div class="${cls}" data-id="${item.id}">
+      <div class="shop-item-left">
+        <div class="shop-swatch" style="background:linear-gradient(135deg,${c1},${c2})"></div>
+        <div>
+          <div class="shop-item-name">${item.name}</div>
+          <div class="shop-item-desc">${item.desc}</div>
+        </div>
+      </div>
+      <div>
+        ${isEquipped ? '<span class="shop-item-equip">EQUIPPED</span>' :
+          owned ? '<span class="shop-item-owned">OWNED</span>' :
+          `<span class="shop-item-price">\u2B50 ${item.cost}</span>`}
+      </div>
+    </div>`;
+  }
+
+  container.innerHTML = html;
+
+  // Click handlers
+  container.querySelectorAll('.shop-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.id;
+      if (ownedItems.includes(id)) {
+        equipItem(id);
+      } else {
+        if (buyItem(id)) {
+          equipItem(id);
+        }
+      }
+      renderShop();
+    });
+  });
+}
+
+function openShop() {
+  document.getElementById('hud-shop').style.display = 'block';
+  renderShop();
+}
+
+function closeShop() {
+  document.getElementById('hud-shop').style.display = 'none';
 }
 
 function dodgedObstacle(wasClose) {
   streak++;
-  multiplier = 1 + Math.floor(streak / 5);  // x2 at 5, x3 at 10, etc.
+  multiplier = 1 + Math.floor(streak / 5);
+  if (streak > runMaxStreak) runMaxStreak = streak;
 
   if (wasClose && shipGroup) {
-    // Near-miss bonus
+    runNearMisses++;
     const bonus = 50 * multiplier;
     score += bonus;
     const screenPos = shipGroup.position.clone().project(camera);
@@ -610,12 +985,14 @@ function dodgedObstacle(wasClose) {
     el.style.animation = 'nearMissPop 0.5s forwards';
     setTimeout(() => { el.style.display = 'none'; }, 500);
   }
+  checkMissions();
   updateHUD();
 }
 
 function hitObstacle() {
   streak = 0;
   multiplier = 1;
+  runDamageTaken = true;
   lives--;
   if (lives <= 0) {
     showGameOver();
@@ -648,9 +1025,11 @@ function hitObstacle() {
 
 function showGameOver() {
   gameState = 'dead';
+  checkMissions();
   const isNewRecord = saveHighScore();
   document.getElementById('hud-final-score').textContent = score;
   document.getElementById('hud-final-level').textContent = level;
+  document.getElementById('hud-final-coins').textContent = sessionCoins;
   document.getElementById('hud-new-record').style.display = isNewRecord ? 'block' : 'none';
   document.getElementById('hud-old-record').textContent = isNewRecord ? '' : `Best: ${highScore}`;
   document.getElementById('hud-overlay').style.display = 'flex';
@@ -659,33 +1038,9 @@ function showGameOver() {
 function showLevelUp() {
   const gc = GAME_COLORS[shipColorIdx];
 
-  // ── Phase 1: FINISH LINE ──
-  transitionPhase = 'finish';
-  transitionTimer = FINISH_DURATION;
-
-  // "FINISH" banner
-  const finishEl = document.getElementById('hud-finish');
-  finishEl.style.color = gc.css;
-  finishEl.style.display = 'block';
-  finishEl.style.animation = 'none';
-  finishEl.offsetHeight;
-  finishEl.style.animation = `finishPop ${FINISH_DURATION}s forwards`;
-  setTimeout(() => { finishEl.style.display = 'none'; }, FINISH_DURATION * 1000);
-
-  // Checker bars sliding past on edges
-  const checkerEl = document.getElementById('hud-finish-lines');
-  checkerEl.innerHTML = '';
-  checkerEl.style.display = 'block';
-  for (let side = 0; side < 2; side++) {
-    const bar = document.createElement('div');
-    bar.className = 'checker-bar';
-    bar.style.color = gc.css;
-    bar.style.width = '40px';
-    bar.style[side === 0 ? 'left' : 'right'] = '0';
-    bar.style.animation = `checkerSlide ${FINISH_DURATION}s linear forwards`;
-    checkerEl.appendChild(bar);
-  }
-  setTimeout(() => { checkerEl.style.display = 'none'; }, FINISH_DURATION * 1000);
+  // ── Straight into BOOST ZONE ──
+  transitionPhase = 'boost';
+  transitionTimer = BOOST_DURATION;
 
   // White flash
   const flash = document.getElementById('hud-boost-flash');
@@ -695,52 +1050,53 @@ function showLevelUp() {
   flash.style.animation = 'boostFlash 0.8s forwards';
   setTimeout(() => { flash.style.display = 'none'; }, 800);
 
-  // ── Phase 2: BOOST ZONE (after finish) ──
+  // "LEVEL X" banner during boost
+  const startEl = document.getElementById('hud-lvlstart');
+  startEl.querySelector('.start-text').textContent = `LEVEL ${level}`;
+  startEl.style.color = gc.css;
+  startEl.style.display = 'block';
+  startEl.style.animation = 'none';
+  startEl.offsetHeight;
+  startEl.style.animation = `lvlStartIn 2.0s forwards`;
+  setTimeout(() => { startEl.style.display = 'none'; }, 2000);
+
+  // Spawn coin frenzy
+  spawnBoostCoins((progress + 0.02) % 1.0);
+
+  // Speed lines overlay
+  const boostEl = document.getElementById('hud-boost');
+  boostEl.innerHTML = '';
+  boostEl.style.display = 'block';
+  const lineCount = 30;
+  for (let i = 0; i < lineCount; i++) {
+    const line = document.createElement('div');
+    line.className = 'speed-line';
+    line.style.left = (Math.random() * 100) + '%';
+    line.style.width = (1 + Math.random() * 3) + 'px';
+    line.style.height = (15 + Math.random() * 30) + 'vh';
+    line.style.color = gc.css;
+    line.style.animation = `boostLine ${0.4 + Math.random() * 0.6}s linear ${Math.random() * BOOST_DURATION}s infinite`;
+    boostEl.appendChild(line);
+  }
+  setTimeout(() => { boostEl.style.display = 'none'; }, BOOST_DURATION * 1000);
+
+  // ── End of boost → LEVEL START ──
   setTimeout(() => {
-    if (transitionPhase !== 'finish') return;
-    transitionPhase = 'boost';
-    transitionTimer = BOOST_DURATION;
+    if (transitionPhase !== 'boost') return;
+    transitionPhase = 'start';
+    transitionTimer = START_DURATION;
 
-    // Speed lines overlay
-    const boostEl = document.getElementById('hud-boost');
-    boostEl.innerHTML = '';
-    boostEl.style.display = 'block';
-    const lineCount = 30;
-    for (let i = 0; i < lineCount; i++) {
-      const line = document.createElement('div');
-      line.className = 'speed-line';
-      line.style.left = (Math.random() * 100) + '%';
-      line.style.width = (1 + Math.random() * 3) + 'px';
-      line.style.height = (15 + Math.random() * 30) + 'vh';
-      line.style.color = gc.css;
-      line.style.animation = `boostLine ${0.4 + Math.random() * 0.6}s linear ${Math.random() * BOOST_DURATION}s infinite`;
-      boostEl.appendChild(line);
-    }
-    setTimeout(() => { boostEl.style.display = 'none'; }, BOOST_DURATION * 1000);
+    // Place start-portal ahead of ship
+    const startPortalT = (progress + 0.04) % 1.0;
+    placePortal(startPortalT, gc.hex);
 
-    // ── Phase 3: LEVEL START (after boost) ──
     setTimeout(() => {
-      if (transitionPhase !== 'boost') return;
-      transitionPhase = 'start';
-      transitionTimer = START_DURATION;
-
-      // "LEVEL X" start banner
-      const startEl = document.getElementById('hud-lvlstart');
-      startEl.querySelector('.start-text').textContent = `LEVEL ${level}`;
-      startEl.style.color = gc.css;
-      startEl.style.display = 'block';
-      startEl.style.animation = 'none';
-      startEl.offsetHeight;
-      startEl.style.animation = `lvlStartIn ${START_DURATION}s forwards`;
-      setTimeout(() => {
-        startEl.style.display = 'none';
-        transitionPhase = 'none';
-        transitionTimer = 0;
-        spawnSafe = 1.5; // grace period after level transition
-      }, START_DURATION * 1000);
-    }, BOOST_DURATION * 1000);
-
-  }, FINISH_DURATION * 1000);
+      transitionPhase = 'none';
+      transitionTimer = 0;
+      spawnSafe = 1.5;
+      hidePortal();
+    }, START_DURATION * 1000);
+  }, BOOST_DURATION * 1000);
 }
 
 let spawnSafe = 0; // grace period after restart (seconds)
@@ -749,17 +1105,86 @@ let spawnSafe = 0; // grace period after restart (seconds)
 // Phases: 'none' → 'finish' (1.5s) → 'boost' (2.5s, no obstacles) → 'start' (1.5s) → 'none'
 let transitionPhase = 'none';
 let transitionTimer = 0;
-const FINISH_DURATION = 1.5;
-const BOOST_DURATION = 2.5;
-const START_DURATION = 1.5;
+const BOOST_DURATION = 5.0;
+const START_DURATION = 1.0;
 let boostSpeedMul = 1.0;
 let boostFovTarget = 85;
 let boostBloomTarget = 0.15;
 let targetHue = 0;
 
+// ── Level portal (3D ring visible before level transition) ──
+let portalMesh = null;
+let portalT = -1;       // t-position on curve (-1 = inactive)
+let portalPlaced = false;
+
+function createPortal() {
+  const ringGeo = new THREE.TorusGeometry(TUBE_R - 2, 0.6, 16, 48);
+  const ringMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    fog: false,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(ringGeo, ringMat);
+  mesh.visible = false;
+  scene.add(mesh);
+
+  // Solid inner disc — blocks view of obstacles behind
+  const discGeo = new THREE.CircleGeometry(TUBE_R - 2.5, 32);
+  const discMat = new THREE.MeshBasicMaterial({
+    color: 0x000000,
+    transparent: true,
+    opacity: 0.85,
+    fog: false,
+    side: THREE.DoubleSide,
+  });
+  const disc = new THREE.Mesh(discGeo, discMat);
+  mesh.add(disc);
+
+  // Colored inner ring glow
+  const innerRingGeo = new THREE.TorusGeometry(TUBE_R - 3, 0.3, 12, 48);
+  const innerRingMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.5,
+    fog: false,
+    side: THREE.DoubleSide,
+  });
+  const innerRing = new THREE.Mesh(innerRingGeo, innerRingMat);
+  innerRing.position.z = 0.1;
+  mesh.add(innerRing);
+
+  mesh.userData.ringMat = ringMat;
+  mesh.userData.discMat = discMat;
+  mesh.userData.innerRingMat = innerRingMat;
+  return mesh;
+}
+
+function placePortal(tPos, color) {
+  if (!portalMesh) portalMesh = createPortal();
+  portalT = tPos;
+  portalPlaced = true;
+
+  const pos = curve.getPointAt(tPos);
+  const tan = curve.getTangentAt(tPos).normalize();
+  portalMesh.position.copy(pos);
+  portalMesh.lookAt(pos.clone().add(tan));
+
+  portalMesh.userData.ringMat.color.set(color);
+  portalMesh.userData.innerRingMat.color.set(color);
+  portalMesh.visible = true;
+  portalMesh.scale.setScalar(1);
+}
+
+function hidePortal() {
+  if (portalMesh) portalMesh.visible = false;
+  portalT = -1;
+  portalPlaced = false;
+}
+
 function resetGameState() {
   score = 0;
   level = 1;
+  levelTimer = LEVEL_DURATION;
   lives = 3;
   shipColorIdx = 0;
   progress = 0.0;
@@ -768,6 +1193,8 @@ function resetGameState() {
   streak = 0;
   multiplier = 1;
   coinBoostTimer = 0;
+  resetRunTracking();
+  applyEquipped();
   transitionPhase = 'none';
   transitionTimer = 0;
   boostSpeedMul = 1.0;
@@ -775,6 +1202,8 @@ function resetGameState() {
   boostBloomTarget = 0.15;
   targetHue = 0;
   tubeMat.uniforms.uHue.value = 0;
+  hidePortal();
+  clearBoostCoins();
   document.getElementById('hud-boost').style.display = 'none';
   document.getElementById('hud-finish').style.display = 'none';
   document.getElementById('hud-finish-lines').style.display = 'none';
@@ -805,6 +1234,12 @@ document.getElementById('hud-bar').style.display = 'none';
 const menuHs = document.getElementById('menu-highscore');
 if (highScore > 0) menuHs.textContent = `Best: ${highScore}`;
 updateHUD();
+
+// Shop button events
+document.getElementById('menu-shop-btn').addEventListener('click', e => { e.stopPropagation(); openShop(); });
+document.getElementById('gameover-shop-btn').addEventListener('click', e => { e.stopPropagation(); openShop(); });
+document.getElementById('shop-close').addEventListener('click', closeShop);
+document.addEventListener('keydown', e => { if (e.code === 'Escape' && document.getElementById('hud-shop').style.display === 'block') { closeShop(); e.stopPropagation(); } }, true);
 
 // ═══════════════════════════════════════════════════
 // SPACESHIP PLAYER — code-generated crystal ship
@@ -916,52 +1351,68 @@ scene.add(shipGroup);
 const obstacles = [];
 const TUBE_R = 14;
 
-// Obstacle patterns — Tunnel Rush style
+// Obstacle patterns — each type has a unique color identity
 // innerR: how far the block reaches inward (lower = thicker wall, harder)
 // The ship flies at radius ~12.8
+// maxGapAngle: largest angular gap (used for spacing — bigger gap = less rotation needed)
 const OBS_PATTERNS = [
-  { slices: 2, gaps: 1, innerR: 5,  name: 'half-wall' },      // thick half-wall
-  { slices: 3, gaps: 1, innerR: 6,  name: '3-wall-1gap' },    // 3 thick segments
-  { slices: 4, gaps: 1, innerR: 5,  name: '4-wall-1gap' },    // 4 segments, 1 gap
-  { slices: 4, gaps: 2, innerR: 6,  name: '4-wall-2gap' },    // 4 segments, 2 gaps (easier)
-  { slices: 2, gaps: 1, innerR: 3,  name: 'half-thick' },     // very thick half
-  { slices: 3, gaps: 1, innerR: 4,  name: '3-wall-thick' },   // 3 thick segments
+  { slices: 2, gaps: 1, innerR: 5,  name: 'half-wall',    color: 0xff4466, css: '#ff4466' },  // red — 180° wall
+  { slices: 3, gaps: 1, innerR: 6,  name: '3-wall-1gap',  color: 0x44aaff, css: '#44aaff' },  // blue — 120° gap
+  { slices: 4, gaps: 1, innerR: 5,  name: '4-wall-1gap',  color: 0xffaa22, css: '#ffaa22' },  // orange — 90° gap
+  { slices: 4, gaps: 2, innerR: 6,  name: '4-wall-2gap',  color: 0x44ff88, css: '#44ff88' },  // green — 2x90° gaps
+  { slices: 2, gaps: 1, innerR: 3,  name: 'half-thick',   color: 0xff66ff, css: '#ff66ff' },  // pink — thick 180°
+  { slices: 3, gaps: 1, innerR: 4,  name: '3-wall-thick', color: 0xffdd44, css: '#ffdd44' },  // yellow — thick 240°
 ];
 
 function generateObstacles() {
   obstacles.forEach(o => { if (o.mesh) scene.remove(o.mesh); });
   obstacles.length = 0;
 
-  const count = 40;
-  const tPositions = [];
-  for (let i = 0; i < count; i++) {
-    const t = 0.08 + (i / count) * 0.87;
-    tPositions.push(t);
-    // ~15% chance of a double obstacle (second one close behind)
-    if (Math.random() < 0.15) {
-      tPositions.push(t + 0.012);
-    }
-  }
-  for (let i = 0; i < tPositions.length; i++) {
-    const t = tPositions[i] % 1.0;
+  // Build obstacle list with smart spacing
+  const baseCount = 40;
+  const obsDefs = []; // { t, patIdx, gapAngle (world) }
+  let prevGapAngle = 0;
+
+  for (let i = 0; i < baseCount; i++) {
     const patIdx = Math.floor(Math.random() * OBS_PATTERNS.length);
-    const colIdx = Math.floor(Math.random() * GAME_COLORS.length);
-    const gc = GAME_COLORS[colIdx];
+    const pat = OBS_PATTERNS[patIdx];
+    const randAngle = Math.random() * Math.PI * 2;
+    const sliceAngle = (Math.PI * 2) / pat.slices;
+    const gapStart = Math.floor(Math.random() * pat.slices);
+    const gapAngle = randAngle + (gapStart + 0.5) * sliceAngle;
+
+    // Calculate angular difference from previous obstacle's gap
+    let angleDiff = Math.abs(gapAngle - prevGapAngle) % (Math.PI * 2);
+    if (angleDiff > Math.PI) angleDiff = Math.PI * 2 - angleDiff;
+
+    // Base spacing + extra spacing for large rotations
+    const baseT = 0.87 / baseCount;
+    const extraSpacing = angleDiff > Math.PI * 0.6 ? baseT * 0.6 : 0;
+
+    const t = i === 0 ? 0.08 : obsDefs[obsDefs.length - 1].t + baseT + extraSpacing;
+    if (t > 0.92) break; // stop generating — don't wrap around
+    obsDefs.push({ t, patIdx, randAngle, gapStart });
+    prevGapAngle = gapAngle;
+  }
+
+  for (let i = 0; i < obsDefs.length; i++) {
+    const def = obsDefs[i];
+    const t = def.t;
+    const patIdx = def.patIdx;
     const pat = OBS_PATTERNS[patIdx];
 
     const sliceAngle = (Math.PI * 2) / pat.slices;
-    const padding = 0.10; // gap between segments
-    const segLength = 3.0; // depth along tunnel
+    const padding = 0.10;
+    const segLength = 3.0;
 
-    // Pick which segment(s) to skip (the gap to fly through)
-    const gapStart = Math.floor(Math.random() * pat.slices);
+    // Use pre-computed gap and rotation
+    const gapStart = def.gapStart;
     const gapIndices = new Set();
     for (let g = 0; g < pat.gaps; g++) {
       gapIndices.add((gapStart + g * Math.floor(pat.slices / pat.gaps)) % pat.slices);
     }
 
-    // Random rotation
-    const randAngle = Math.random() * Math.PI * 2;
+    const randAngle = def.randAngle;
 
     // Build all wall segments as one geometry
     const shapes = [];
@@ -999,8 +1450,8 @@ function generateObstacles() {
     const normal = new THREE.Vector3().crossVectors(right, tan).normalize();
 
     const mat = new THREE.MeshStandardMaterial({
-      color: gc.hex,
-      emissive: gc.hex,
+      color: pat.color,
+      emissive: pat.color,
       emissiveIntensity: 0.05,
       metalness: 0.0,
       roughness: 1.0,
@@ -1046,7 +1497,7 @@ function generateObstacles() {
     const spinSpeed = spinning ? (0.3 + Math.random() * 0.5) * (Math.random() > 0.5 ? 1 : -1) : 0;
 
     obstacles.push({
-      t, colIdx, mesh,
+      t, mesh,
       gapDirs,
       gapHalfCos: Math.cos(sliceAngle / 2 - 0.05),
       innerR: pat.innerR,
@@ -1065,12 +1516,13 @@ generateObstacles();
 // COINS — collectible pickups placed in obstacle gaps
 // ═══════════════════════════════════════════════════
 const coins = [];
-const COIN_RADIUS = 0.6;
+const COIN_RADIUS = 0.9;
 const COIN_VALUE = 100;
-const COIN_COLLECT_DIST = 2.5; // world-space distance for pickup
+const COIN_COLLECT_DIST = 6.0;  // world-space distance for pickup
+const COIN_MAGNET_DIST = 10.0;  // start pulling coin toward ship
 
 // Shared coin geometry and material
-const coinGeo = new THREE.TorusGeometry(COIN_RADIUS, 0.15, 8, 16);
+const coinGeo = new THREE.TorusGeometry(COIN_RADIUS, 0.2, 8, 20);
 const coinMat = new THREE.MeshStandardMaterial({
   color: 0xffcc00,
   emissive: 0x332200,
@@ -1083,41 +1535,102 @@ const coinMat = new THREE.MeshStandardMaterial({
 function generateCoins() {
   coins.forEach(c => { if (c.mesh) scene.remove(c.mesh); });
   coins.length = 0;
+  // Coins are only spawned during boost zones now
+}
 
-  for (const obs of obstacles) {
-    // ~50% chance to spawn a coin in each gap
-    if (Math.random() > 0.5) continue;
+// ── Boost zone bonus coins (spawned in patterns during speed zone) ──
+const boostCoins = [];
 
-    // Pick a random gap direction for this obstacle
-    if (obs.gapDirs.length === 0) continue;
-    const gapDir = obs.gapDirs[Math.floor(Math.random() * obs.gapDirs.length)];
+function clearBoostCoins() {
+  boostCoins.forEach(c => { if (c.mesh) scene.remove(c.mesh); });
+  boostCoins.length = 0;
+}
 
-    // Position coin in the gap at the ship's riding radius
-    const center = curve.getPointAt(obs.t);
-    const coinPos = center.clone().addScaledVector(gapDir, TUBE_R - 1.5);
+function spawnBoostCoins(startT) {
+  clearBoostCoins();
+
+  const patterns = ['spiral', 'rings', 'zigzag'];
+  const pattern = patterns[Math.floor(Math.random() * patterns.length)];
+  const count = 60;
+  const span = 0.25;
+
+  for (let i = 0; i < count; i++) {
+    const frac = i / count;
+    const coinT = (startT + frac * span) % 1.0;
+    const center = curve.getPointAt(coinT);
+    const tan = curve.getTangentAt(coinT).normalize();
+    const up = new THREE.Vector3(0, 1, 0);
+    const right = new THREE.Vector3().crossVectors(tan, up).normalize();
+    const normal = new THREE.Vector3().crossVectors(right, tan).normalize();
+
+    let angle;
+    if (pattern === 'spiral') {
+      angle = frac * Math.PI * 6;
+    } else if (pattern === 'rings') {
+      const ring = Math.floor(i / 5);
+      const slot = i % 5;
+      angle = slot * (Math.PI * 2 / 5) + ring * 0.4;
+    } else {
+      angle = (i % 2 === 0 ? 0.3 : -0.3) * Math.PI + Math.floor(i / 2) * 0.15;
+    }
+
+    const radius = TUBE_R - 1.5;
+    const dir = new THREE.Vector3()
+      .addScaledVector(normal, -Math.cos(angle))
+      .addScaledVector(right, Math.sin(angle));
+
+    const coinPos = center.clone().addScaledVector(dir, radius);
 
     const mesh = new THREE.Mesh(coinGeo, coinMat.clone());
     mesh.position.copy(coinPos);
-
-    // Orient coin to face roughly along the tunnel
-    const tan = curve.getTangentAt(obs.t).normalize();
     mesh.lookAt(coinPos.clone().add(tan));
-
     mesh.visible = false;
     scene.add(mesh);
 
-    coins.push({ t: obs.t, mesh, collected: false });
+    boostCoins.push({ t: coinT, mesh, collected: false });
   }
 }
 
-generateCoins();
+// Coin pickup animation particles
+const coinFx = []; // { mesh, vel, life, maxLife }
 
 function collectCoin(coin) {
   coin.collected = true;
-  coin.mesh.visible = false;
   const value = COIN_VALUE * multiplier;
   score += value;
-  coinBoostTimer = 0.5; // brief speed burst
+  coinBoostTimer = 0.5;
+  runCoinsCollected++;
+  sessionCoins++;
+  wallet++;
+  saveWallet();
+  checkMissions();
+
+  // Spawn sparkle particles at coin position
+  const pos = coin.mesh.position.clone();
+  for (let i = 0; i < 8; i++) {
+    const geo = new THREE.OctahedronGeometry(0.15 + Math.random() * 0.1);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffcc00,
+      transparent: true,
+      opacity: 1,
+      fog: false,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.position.copy(pos);
+    scene.add(m);
+
+    // Random velocity biased toward camera
+    const toCamera = camera.position.clone().sub(pos).normalize();
+    const vel = toCamera.multiplyScalar(3 + Math.random() * 4);
+    vel.x += (Math.random() - 0.5) * 6;
+    vel.y += (Math.random() - 0.5) * 6;
+    vel.z += (Math.random() - 0.5) * 6;
+
+    coinFx.push({ mesh: m, vel, life: 0.5 + Math.random() * 0.3, maxLife: 0.5 + Math.random() * 0.3 });
+  }
+
+  // Hide the coin mesh
+  coin.mesh.visible = false;
 
   // "+X" popup
   if (shipGroup) {
@@ -1133,6 +1646,26 @@ function collectCoin(coin) {
     setTimeout(() => { popup.style.display = 'none'; }, 600);
   }
   updateHUD();
+}
+
+function updateCoinFx(dt) {
+  for (let i = coinFx.length - 1; i >= 0; i--) {
+    const p = coinFx[i];
+    p.life -= dt;
+    if (p.life <= 0) {
+      scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      p.mesh.material.dispose();
+      coinFx.splice(i, 1);
+      continue;
+    }
+    const t = p.life / p.maxLife;
+    p.mesh.position.addScaledVector(p.vel, dt);
+    p.mesh.material.opacity = t;
+    p.mesh.scale.setScalar(t);
+    p.mesh.rotation.x += dt * 8;
+    p.mesh.rotation.y += dt * 6;
+  }
 }
 
 // ═══════════════════════════════════════════════════
@@ -1384,8 +1917,9 @@ const keys = {};
 
 document.addEventListener('keydown', e => {
   keys[e.code] = true;
-  if (e.code === 'Space' && gameState === 'menu') startGame();
-  if (e.code === 'Space' && gameState === 'dead') restartGame();
+  const shopOpen = document.getElementById('hud-shop').style.display === 'block';
+  if (e.code === 'Space' && gameState === 'menu' && !shopOpen) startGame();
+  if (e.code === 'Space' && gameState === 'dead' && !shopOpen) restartGame();
   if (e.code === 'KeyP' || e.code === 'Escape') {
     if (gameState === 'playing') { gameState = 'paused'; }
     else if (gameState === 'paused') { gameState = 'playing'; clock.getDelta(); }
@@ -1474,12 +2008,7 @@ function animate() {
   tubeMat.uniforms.uTime.value = t;
 
   // ── Level transition update ──
-  if (transitionPhase === 'finish') {
-    // Slight slowdown at finish line
-    boostSpeedMul = 0.6;
-    boostFovTarget = 80;
-    boostBloomTarget = 0.5;
-  } else if (transitionPhase === 'boost') {
+  if (transitionPhase === 'boost') {
     transitionTimer -= dt;
     const p = Math.max(0, transitionTimer / BOOST_DURATION);
     boostSpeedMul = 1.0 + 1.5 * p;
@@ -1587,14 +2116,13 @@ function animate() {
   for (const obs of obstacles) {
     const td = tDist(progress, obs.t);
     const absTd = Math.abs(td);
-    const vis = absTd < 0.08 && !inTransition;
+    // Hide obstacles behind the end-portal
+    const behindPortal = portalPlaced && portalT >= 0 && tDist(portalT, obs.t) < 0 && tDist(portalT, obs.t) > -0.08;
+    const vis = absTd < 0.08 && !inTransition && !behindPortal;
 
     // Show/hide obstacle mesh (hidden during level transitions)
-    const isMatch = obs.colIdx === shipColorIdx;
     obs.mesh.visible = vis;
     if (vis) {
-      obs.mesh.material.opacity = isMatch ? 0.1 : 0.85;
-      obs.mesh.material.emissiveIntensity = isMatch ? 0.02 : 0.05;
 
       // Spin rotating obstacles and recalculate gap directions
       if (obs.spinning && gameState === 'playing') {
@@ -1616,8 +2144,8 @@ function animate() {
     // Collision: check EVERY frame while ship is near obstacle
     if (gameState === 'playing' && !inTransition) {
       // td < 0 = approaching, td > 0 = passed; generous before, tight after
-      const inRange = td > -0.005 && td < 0.0015;
-      if (spawnSafe <= 0 && inRange && !obs.hit && !isMatch && shipGroup) {
+      const inRange = td > -0.004 && td < 0.0005;
+      if (spawnSafe <= 0 && inRange && !obs.hit && shipGroup) {
         const obsCenter = curve.getPointAt(obs.t);
         const obsTan = curve.getTangentAt(obs.t).normalize();
 
@@ -1652,7 +2180,7 @@ function animate() {
       }
 
       // Dodge detection: ship has passed the obstacle without being hit
-      if (td > 0.003 && !obs.hit && !obs.dodged && !isMatch) {
+      if (td > 0.003 && !obs.hit && !obs.dodged) {
         const wasClose = obs._bestGapDot !== undefined &&
           obs._bestGapDot < obs.gapHalfCos + 0.15 && obs._bestGapDot > obs.gapHalfCos - 0.1;
         dodgedObstacle(wasClose);
@@ -1665,42 +2193,97 @@ function animate() {
     }
   }
 
-  // ── Coins visibility + collection ──
-  for (const coin of coins) {
-    if (coin.collected) continue;
-    const td = tDist(progress, coin.t);
-    const absTd = Math.abs(td);
-    const vis = absTd < 0.08 && !inTransition;
-    coin.mesh.visible = vis;
-    if (vis) {
-      // Spin the coin
-      coin.mesh.rotation.z += dt * 3.0;
-    }
-    // Collection check
-    if (gameState === 'playing' && absTd < 0.005 && shipGroup) {
-      const dist = shipGroup.position.distanceTo(coin.mesh.position);
-      if (dist < COIN_COLLECT_DIST) {
-        collectCoin(coin);
+  // ── Boost zone coins ──
+  if (transitionPhase === 'boost') {
+    for (const coin of boostCoins) {
+      if (coin.collected) continue;
+      const td = tDist(progress, coin.t);
+      const absTd = Math.abs(td);
+      coin.mesh.visible = td > -0.15 && td < 0.005; // visible ahead, hide once passed
+      if (coin.mesh.visible) {
+        coin.mesh.rotation.z += dt * 5.0; // spin faster in boost
+      }
+      if (gameState === 'playing' && absTd < 0.015 && shipGroup) {
+        const dist = shipGroup.position.distanceTo(coin.mesh.position);
+        if (dist < COIN_MAGNET_DIST * 1.5 && dist > COIN_COLLECT_DIST) {
+          const pullDir = shipGroup.position.clone().sub(coin.mesh.position).normalize();
+          coin.mesh.position.addScaledVector(pullDir, dt * 25);
+        }
+        if (dist < COIN_COLLECT_DIST) {
+          collectCoin(coin);
+        }
       }
     }
+  } else if (transitionPhase === 'start') {
+    // Keep coins visible through start phase, still collectible
+    for (const coin of boostCoins) {
+      if (coin.collected) continue;
+      const td = tDist(progress, coin.t);
+      coin.mesh.visible = td > -0.15 && td < 0.005;
+      if (coin.mesh.visible) coin.mesh.rotation.z += dt * 5.0;
+      if (gameState === 'playing' && Math.abs(td) < 0.015 && shipGroup) {
+        const dist = shipGroup.position.distanceTo(coin.mesh.position);
+        if (dist < 8.0) collectCoin(coin);
+      }
+    }
+  } else if (boostCoins.length > 0 && transitionPhase === 'none') {
+    clearBoostCoins();
   }
 
   // ── Scoring + Level progression (only when playing) ──
   if (gameState === 'playing') {
-    score += Math.round(dt * settings.speed * 500);
-    const newLevel = Math.floor(score / LEVEL_THRESHOLD) + 1;
-    if (newLevel > level) {
-      level = newLevel;
-      shipColorIdx = (level - 1) % GAME_COLORS.length;
-      targetHue = (level - 1) * 1.2; // ~69° per level, cycles through colors
-      showLevelUp();
+    score += Math.round(dt * settings.speed * 100);
+
+    // Timer-based level progression (only count down outside transitions)
+    if (transitionPhase === 'none') {
+      levelTimer -= dt;
+
+      // Place end-portal with ~4 seconds left
+      if (!portalPlaced && levelTimer < 4 && levelTimer > 0) {
+        const portalAhead = (progress + 0.05) % 1.0;
+        const nextGc = GAME_COLORS[level % GAME_COLORS.length];
+        placePortal(portalAhead, nextGc.hex);
+      }
+
+      // Animate portal
+      if (portalMesh && portalMesh.visible && portalT >= 0) {
+        const ptd = tDist(progress, portalT);
+        const pulse = 0.5 + 0.5 * Math.sin(t * 6);
+        portalMesh.userData.innerRingMat.opacity = 0.3 + 0.4 * pulse;
+        portalMesh.rotation.z = t * 0.5; // slow spin
+        const approach = Math.max(0, 1 - Math.abs(ptd) * 30);
+        portalMesh.scale.setScalar(1 + approach * 0.3);
+
+        // Ship passed through portal → trigger level up
+        if (ptd > 0.003) {
+          level++;
+          shipColorIdx = (level - 1) % GAME_COLORS.length;
+          targetHue = (level - 1) * 1.2;
+          levelTimer = LEVEL_DURATION;
+          hidePortal();
+          checkMissions();
+          showLevelUp();
+        }
+      }
+
+      // Failsafe: if timer runs out without hitting portal
+      if (levelTimer <= -2) {
+        level++;
+        shipColorIdx = (level - 1) % GAME_COLORS.length;
+        targetHue = (level - 1) * 1.2;
+        levelTimer = LEVEL_DURATION;
+        hidePortal();
+        showLevelUp();
+      }
     }
+
     updateHUD();
   }
 
   // Update debris explosion particles — pass tunnel speed (world units/sec) so debris follows camera
   const camWorldSpeed = settings.speed * 0.1 * curve.getLength();
   updateDebris(dt, camWorldSpeed);
+  updateCoinFx(dt);
 
   composer.render();
 }
