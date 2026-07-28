@@ -7,6 +7,8 @@ import { RGBShiftShader } from 'three/addons/shaders/RGBShiftShader.js';
 
 import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
 
+import { audio } from './audio.js';
+
 // ═══════════════════════════════════════════════════
 // SCENE SETUP
 // ═══════════════════════════════════════════════════
@@ -508,6 +510,11 @@ const GAME_COLORS = [
 
 let gameState = 'menu';
 let score = 0;
+// Points per unit of tunnel travelled. Tuned so level 1 pays ~18/sec, which
+// is what the original per-frame formula was aiming for. Because it's driven
+// by distance rather than time, later levels pay more simply for being faster.
+const DISTANCE_SCORE = 1000;
+let scoreCarry = 0; // fractional points not yet banked into `score`
 let level = 1;
 let shipColorIdx = 0;
 const LEVEL_DURATION = 25; // seconds per level
@@ -872,6 +879,7 @@ function checkMissions() {
 }
 
 function showMissionComplete(def) {
+  audio.play('mission_complete');
   const el = document.getElementById('hud-mission-complete');
   el.querySelector('.mc-text').textContent = def.desc;
   el.querySelector('.mc-reward').textContent = `+${def.reward}`;
@@ -969,29 +977,24 @@ hudEl.innerHTML = `
   #hud-lives { font-size:26px; letter-spacing:5px; filter:drop-shadow(0 0 8px #ff4488); }
   #hud-flash { display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:12; pointer-events:none; background:radial-gradient(transparent 30%, rgba(255,0,80,0.55)); border:5px solid #ff2266; box-sizing:border-box; box-shadow:inset 0 0 80px rgba(255,0,80,0.4); }
   @keyframes hudFlash { 0%{opacity:1} 100%{opacity:0} }
-  #hud-hit { display:none; position:fixed; z-index:15; pointer-events:none; font-family:'Courier New',monospace; font-size:42px; font-weight:bold; color:#ff2266; text-shadow:0 0 24px #ff2266, 0 0 60px rgba(255,0,80,0.7); }
-  @keyframes hudHitPop { 0%{opacity:1;transform:translate(-50%,-50%) scale(1.8)} 50%{opacity:1;transform:translate(-50%,-80%) scale(1.1)} 100%{opacity:0;transform:translate(-50%,-130%) scale(0.75)} }
-  #hud-menu { position:fixed; top:0; left:0; width:100%; height:100%; z-index:25; display:flex; align-items:center; justify-content:center; flex-direction:column; font-family:'Courier New',monospace; color:#fff;
-    background:radial-gradient(ellipse at center, rgba(10,20,50,0.75) 0%, rgba(0,0,0,0.88) 100%); }
-  #hud-menu .title { font-size:72px; font-weight:bold; letter-spacing:8px; color:#00eeff;
-    text-shadow:0 0 30px #00eeff, 0 0 80px rgba(0,220,255,0.55), 0 0 140px rgba(255,0,200,0.25); margin-bottom:10px;
-    animation:titlePulse 3s ease-in-out infinite; }
-  @keyframes titlePulse { 0%,100%{filter:hue-rotate(0deg) brightness(1)} 50%{filter:hue-rotate(25deg) brightness(1.15)} }
-  #hud-menu .subtitle { font-size:17px; letter-spacing:10px; opacity:0.55; margin-bottom:52px; text-transform:uppercase; color:#aaddff; }
-  #hud-menu .prompt { font-size:22px; animation:hudBlink 1.2s infinite; opacity:0.95; color:#fff;
-    text-shadow:0 0 20px rgba(0,255,255,0.6); }
-  #hud-menu .highscore { font-size:17px; margin-top:36px; opacity:0.65; color:#ffcc66; text-shadow:0 0 12px rgba(255,200,80,0.4); }
-  #hud-overlay { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:radial-gradient(ellipse at center, rgba(20,0,20,0.75) 0%, rgba(0,0,0,0.9) 100%); z-index:20; align-items:center; justify-content:center; flex-direction:column; font-family:'Courier New',monospace; color:#fff; }
-  #hud-overlay h1 { font-size:68px; margin:0 0 18px; color:#ff2266; text-shadow:0 0 40px #ff2266, 0 0 100px rgba(255,0,80,0.5); }
-  #hud-overlay .stats { font-size:22px; margin:7px 0; opacity:0.95; text-shadow:0 0 10px rgba(0,200,255,0.4); }
-  #hud-overlay .stats span { color:#00eeff; text-shadow:0 0 14px #00eeff; }
-  #hud-overlay .new-record { font-size:28px; color:#ffdd44; text-shadow:0 0 28px #ffdd44, 0 0 60px rgba(255,200,0,0.5); margin:18px 0; animation:hudBlink 0.8s infinite; }
-  #hud-overlay .highscore-line { font-size:17px; opacity:0.55; margin:8px 0; }
-  #hud-overlay .blink { animation:hudBlink 1s infinite; font-size:19px; margin-top:32px; opacity:0.85; }
-  @keyframes hudBlink { 0%,100%{opacity:0.9} 50%{opacity:0.25} }
-  #hud-lvlup { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); font-family:'Courier New',monospace; font-size:58px; font-weight:bold; z-index:15; pointer-events:none;
-    text-shadow:0 0 30px currentColor, 0 0 80px currentColor, 0 0 140px currentColor; }
-  @keyframes hudLvlPop { 0%{opacity:0;transform:translate(-50%,-50%) scale(0.4)} 12%{opacity:1;transform:translate(-50%,-50%) scale(1.45)} 28%{transform:translate(-50%,-50%) scale(1)} 100%{opacity:0;transform:translate(-50%,-50%) translateY(-70px)} }
+  #hud-hit { display:none; position:fixed; z-index:15; pointer-events:none; font-family:'Courier New',monospace; font-size:36px; font-weight:bold; color:#ff0044; text-shadow:0 0 20px #ff0044, 0 0 40px rgba(255,0,68,0.5); }
+  @keyframes hudHitPop { 0%{opacity:1;transform:translate(-50%,-50%) scale(1.5)} 50%{opacity:1;transform:translate(-50%,-80%) scale(1)} 100%{opacity:0;transform:translate(-50%,-120%) scale(0.8)} }
+  #hud-menu { position:fixed; top:0; left:0; width:100%; height:100%; z-index:25; display:flex; align-items:center; justify-content:center; flex-direction:column; font-family:'Courier New',monospace; color:#fff; background:rgba(0,0,0,0.6); }
+  #hud-menu .title { font-size:64px; font-weight:bold; letter-spacing:6px; color:#00ccff; text-shadow:0 0 40px #00ccff, 0 0 80px rgba(0,204,255,0.3); margin-bottom:8px; }
+  #hud-menu .subtitle { font-size:16px; letter-spacing:8px; opacity:0.5; margin-bottom:48px; text-transform:uppercase; }
+  #hud-menu .prompt { font-size:20px; animation:hudBlink 1.2s infinite; opacity:0.9; }
+  #hud-menu .menu-keys { font-size:12px; letter-spacing:2px; margin-top:20px; opacity:0.4; }
+  #hud-menu .highscore { font-size:16px; margin-top:32px; opacity:0.6; }
+  #hud-overlay { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:20; align-items:center; justify-content:center; flex-direction:column; font-family:'Courier New',monospace; color:#fff; }
+  #hud-overlay h1 { font-size:60px; margin:0 0 16px; color:#ff0044; text-shadow:0 0 40px #ff0044; }
+  #hud-overlay .stats { font-size:20px; margin:6px 0; opacity:0.9; }
+  #hud-overlay .stats span { color:#00ccff; }
+  #hud-overlay .new-record { font-size:24px; color:#ffcc00; text-shadow:0 0 20px #ffcc00; margin:16px 0; animation:hudBlink 0.8s infinite; }
+  #hud-overlay .highscore-line { font-size:16px; opacity:0.5; margin:8px 0; }
+  #hud-overlay .blink { animation:hudBlink 1s infinite; font-size:18px; margin-top:28px; opacity:0.8; }
+  @keyframes hudBlink { 0%,100%{opacity:0.8} 50%{opacity:0.2} }
+  #hud-lvlup { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); font-family:'Courier New',monospace; font-size:52px; font-weight:bold; z-index:15; pointer-events:none; text-shadow:0 0 40px currentColor; }
+  @keyframes hudLvlPop { 0%{opacity:0;transform:translate(-50%,-50%) scale(0.5)} 15%{opacity:1;transform:translate(-50%,-50%) scale(1.3)} 30%{transform:translate(-50%,-50%) scale(1)} 100%{opacity:0;transform:translate(-50%,-50%) translateY(-60px)} }
   #hud-boost { display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:11; pointer-events:none; }
   #hud-boost .speed-line { position:absolute; background:linear-gradient(to bottom, transparent, currentColor, transparent); opacity:0; filter:blur(0.5px); }
   @keyframes boostLine { 0%{opacity:0;transform:translateY(-10vh) scaleY(0.5)} 15%{opacity:0.95} 100%{opacity:0;transform:translateY(110vh) scaleY(2.4)} }
@@ -1014,6 +1017,8 @@ hudEl.innerHTML = `
   #hud-streak.active { opacity:1; }
   #hud-near-miss { display:none; position:fixed; z-index:15; pointer-events:none; font-family:'Courier New',monospace; font-size:22px; font-weight:bold; color:#00ffaa; text-shadow:0 0 10px rgba(0,255,170,0.5); }
   @keyframes nearMissPop { 0%{opacity:1;transform:translate(-50%,-50%) scale(1.5)} 40%{opacity:1;transform:translate(-50%,-70%) scale(1)} 100%{opacity:0;transform:translate(-50%,-100%) scale(0.8)} }
+  #hud-mute { display:none; position:fixed; bottom:28px; left:50%; transform:translateX(-50%); z-index:30; pointer-events:none; font-family:'Courier New',monospace; font-size:16px; letter-spacing:2px; color:#fff; text-shadow:0 0 10px rgba(255,255,255,0.4); }
+  @keyframes muteToast { 0%{opacity:0} 15%{opacity:0.9} 75%{opacity:0.9} 100%{opacity:0} }
   #hud-mission-complete { display:none; position:fixed; bottom:120px; left:50%; transform:translateX(-50%); z-index:20; pointer-events:none; font-family:'Courier New',monospace; text-align:center; background:rgba(0,0,0,0.7); border:1px solid #ffcc00; border-radius:8px; padding:12px 24px; }
   .mc-label { font-size:12px; letter-spacing:3px; color:#ffcc00; opacity:0.8; }
   .mc-text { font-size:18px; color:#fff; margin:4px 0; }
@@ -1087,6 +1092,7 @@ hudEl.innerHTML = `
 <div id="hud-coin-popup">+100</div>
 <div id="hud-streak"></div>
 <div id="hud-near-miss">CLOSE!</div>
+<div id="hud-mute">🔊 SOUND ON</div>
 <div id="hud-mission-complete"><div class="mc-label">MISSION COMPLETE</div><div class="mc-text"></div><div class="mc-reward"></div></div>
 <div id="hud-wallet"></div>
 <div id="hud-missions"></div>
@@ -1095,6 +1101,7 @@ hudEl.innerHTML = `
   <div class="title">TUNNEL RUNNER</div>
   <div class="subtitle">Dodge the light</div>
   <div class="prompt">PRESS SPACE TO START</div>
+  <div class="menu-keys">A / D — STEER &nbsp;·&nbsp; P — PAUSE &nbsp;·&nbsp; M — MUTE</div>
   <div class="highscore" id="menu-highscore"></div>
   <div class="menu-opts">
     <div class="menu-row">
@@ -1248,9 +1255,14 @@ function renderShop() {
       const id = el.dataset.id;
       if (ownedItems.includes(id)) {
         equipItem(id);
+        audio.play('ui_click');
       } else {
         if (buyItem(id)) {
           equipItem(id);
+          audio.play('ui_buy');
+        } else {
+          // Can't afford it — flat blip rather than the reward chime.
+          audio.play('ui_click', { rate: 0.7, gain: 0.7 });
         }
       }
       renderShop();
@@ -1294,8 +1306,11 @@ function dodgedObstacle(wasClose) {
     camShake = Math.min(0.5, Math.max(camShake, 0.22) + 0.12);
     const bonus = 75 * multiplier; // P1: stronger near-miss reward
     score += bonus;
-    showFloatText('CLOSE!', '#ffffff', bonus);
-    checkMissions();
+    // Whoosh rises with the streak so a long clean run keeps escalating.
+    audio.play('near_miss', {
+      rate: 0.95 + Math.min(streak, 30) * 0.012,
+      gain: 0.9,
+    });
     const screenPos = shipGroup.position.clone().project(camera);
     const el = document.getElementById('hud-near-miss');
     el.textContent = `CLOSE! +${bonus}`;
@@ -1317,12 +1332,16 @@ function hitObstacle() {
   runDamageTaken = true;
   levelDamageTaken = true;
   lives--;
-  hitStopTimer = 0.07; // brief hit-stop (P1)
-  camShake = Math.min(1.1, camShake + 0.7); // stack slightly, polish decay elsewhere
-  SFX.hit();
+
+  audio.play('impact');
+  audio.duck(0.25, 0.2, 0.6);
+
   if (lives <= 0) {
     showGameOver();
   } else {
+    // Last life — warning pulse under the impact tail.
+    if (lives === 1) audio.play('low_life', { delay: 0.35 });
+
     // Red vignette flash
     const flash = document.getElementById('hud-flash');
     flash.style.display = 'block';
@@ -1351,6 +1370,8 @@ function hitObstacle() {
 
 function showGameOver() {
   gameState = 'dead';
+  audio.stopAllLoops(0.25);
+  audio.play('game_over', { delay: 0.15 });
   checkMissions();
   maybeSaveGhost(score);
   const seedHud = document.getElementById('hud-seed');
@@ -1383,6 +1404,11 @@ function showLevelUp() {
   transitionPhase = 'boost';
   transitionTimer = BOOST_DURATION;
   SFX.levelUp();
+
+  audio.play('level_up');
+  audio.play('boost_start', { delay: 0.25 });
+  audio.duck(0.45, 0.3, 0.8);
+  coinChain = 0; // fresh riff for the coin frenzy
 
   // White flash
   const flash = document.getElementById('hud-boost-flash');
@@ -1428,24 +1454,9 @@ function showLevelUp() {
     transitionPhase = 'start';
     transitionTimer = START_DURATION;
 
-    // P3: fresh layout for this level (seed × level) — fixes "same track forever" + end-of-level ghosts
-    generateObstacles();
-    // Drop anything sitting on top of the ship at the handoff; arm lastTd for the rest
-    for (let i = obstacles.length - 1; i >= 0; i--) {
-      const o = obstacles[i];
-      const td = tDist(progress, o.t);
-      // Remove obstacles in a small cone around the player (would unfair-hit on resume)
-      if (Math.abs(td) < 0.03) {
-        if (o.mesh) scene.remove(o.mesh);
-        obstacles.splice(i, 1);
-        continue;
-      }
-      o.lastTd = td;
-      o.hit = false;
-      o.dodged = false;
-    }
+    audio.play('boost_end');
 
-    // Place start-portal ahead of ship (entry, not exit — no mouth open)
+    // Place start-portal ahead of ship
     const startPortalT = (progress + 0.04) % 1.0;
     placePortal(startPortalT, gc.hex, { exit: false });
 
@@ -1834,6 +1845,7 @@ function updatePortalFx(dt) {
 
 function resetGameState() {
   score = 0;
+  scoreCarry = 0;
   level = 1;
   levelTimer = LEVEL_DURATION;
   lives = 3;
@@ -1876,30 +1888,19 @@ function resetGameState() {
   updateHUD();
 }
 
-function applyRunSeed(seedStr) {
-  const s = (seedStr || '').trim().toUpperCase() || randomSeedStr();
-  runSeedStr = s.slice(0, 12);
-  runSeedNum = hashStringToSeed(runSeedStr);
-  rng = mulberry32(runSeedNum);
+async function startAmbience() {
+  // First call also creates the AudioContext and decodes the assets, so it
+  // has to be awaited before the loops can find their buffers.
+  await audio.unlock();
+  if (gameState !== 'playing') return;
+  audio.stopAllLoops(0.15);
+  audio.startLoop('engine_loop', { filter: true, fade: 0.5 });
+  audio.startLoop('wind_loop', { filter: true, fade: 0.8 });
+  audio.startLoop('music_loop', { bus: 'music', fade: 1.2 });
+  audio.setSpeed(1);
 }
 
-function startGame(opts = {}) {
-  resumeAudio();
-  // Seed rules:
-  //  - practice ON  → always same seed (field / last run)
-  //  - from menu    → use typed seed if any, else random
-  //  - restart/normal → new random seed
-  const menuSeed = document.getElementById('menu-seed-input')?.value?.trim();
-  if (opts.seed) {
-    applyRunSeed(opts.seed);
-  } else if (practiceMode) {
-    applyRunSeed(menuSeed || runSeedStr);
-  } else if (opts.fromMenu) {
-    applyRunSeed(menuSeed || randomSeedStr());
-  } else {
-    applyRunSeed(randomSeedStr());
-  }
-  ghostRecording = new Float32Array(GHOST_SAMPLES);
+function startGame() {
   document.getElementById('hud-menu').style.display = 'none';
   document.getElementById('hud-overlay').style.display = 'none';
   document.getElementById('hud-bar').style.display = 'flex';
@@ -1911,6 +1912,7 @@ function startGame(opts = {}) {
   updateSeedHUD();
   SFX.start();
   gameState = 'playing';
+  startAmbience();
 }
 
 function updateSeedHUD() {
@@ -1941,8 +1943,9 @@ function updateSeedHUD() {
 }
 
 function restartGame() {
-  // Practice keeps seed; normal run rolls a new one via startGame
-  startGame();
+  resetGameState();
+  gameState = 'playing';
+  startAmbience();
 }
 
 // ── Initial menu state ──
@@ -1958,9 +1961,9 @@ updateSeedHUD();
 updateHUD();
 
 // Shop button events
-document.getElementById('menu-shop-btn').addEventListener('click', e => { e.stopPropagation(); openShop(); });
-document.getElementById('gameover-shop-btn').addEventListener('click', e => { e.stopPropagation(); openShop(); });
-document.getElementById('shop-close').addEventListener('click', closeShop);
+document.getElementById('menu-shop-btn').addEventListener('click', e => { e.stopPropagation(); audio.unlock(); audio.play('ui_click'); openShop(); });
+document.getElementById('gameover-shop-btn').addEventListener('click', e => { e.stopPropagation(); audio.play('ui_click'); openShop(); });
+document.getElementById('shop-close').addEventListener('click', () => { audio.play('ui_click'); closeShop(); });
 document.addEventListener('keydown', e => { if (e.code === 'Escape' && document.getElementById('hud-shop').style.display === 'block') { closeShop(); e.stopPropagation(); } }, true);
 
 // P2 menu controls
@@ -2568,11 +2571,23 @@ function spawnBoostCoins(startT) {
 // Coin pickup animation particles
 const coinFx = []; // { mesh, vel, life, maxLife }
 
+// Coin pickups climb a pentatonic ladder while you keep collecting, and
+// reset once you drop the chain — turns a coin run into a little riff.
+const COIN_LADDER = [1.0, 1.122, 1.26, 1.498, 1.682, 2.0];
+let coinChain = 0;
+let lastCoinAt = -99;
+
 function collectCoin(coin) {
   coin.collected = true;
   const value = COIN_VALUE * multiplier;
   score += value;
   coinBoostTimer = 0.5;
+
+  const now = clock.getElapsedTime();
+  coinChain = (now - lastCoinAt < 0.7) ? Math.min(coinChain + 1, COIN_LADDER.length - 1) : 0;
+  lastCoinAt = now;
+  audio.play('coin', { rate: COIN_LADDER[coinChain] });
+
   runCoinsCollected++;
   sessionCoins++;
   wallet++;
@@ -2696,6 +2711,9 @@ function updateShockwaves(dt) {
 function explodeObstacle(obs) {
   const mesh = obs.mesh;
   if (!mesh) return;
+
+  // Slightly after the impact, so hull-hit then shrapnel reads in order.
+  audio.play('debris', { delay: 0.08, rate: 0.9 + Math.random() * 0.25 });
 
   // Get obstacle world position, tangent, and color
   const obsPos = mesh.position.clone();
@@ -3090,14 +3108,32 @@ function updateRibbonTrail(trail, newPos, camPos) {
 // ═══════════════════════════════════════════════════
 const keys = {};
 
+// Browsers only allow audio to start from a user gesture — warm the
+// AudioContext up on the very first interaction so the assets are decoded
+// and ready by the time the run actually begins.
+['keydown', 'pointerdown'].forEach(ev =>
+  document.addEventListener(ev, () => audio.unlock(), { once: true })
+);
+
 document.addEventListener('keydown', e => {
   keys[e.code] = true;
   const shopOpen = document.getElementById('hud-shop').style.display === 'block';
   if (e.code === 'Space' && gameState === 'menu' && !shopOpen) startGame({ fromMenu: true });
   if (e.code === 'Space' && gameState === 'dead' && !shopOpen) restartGame();
+  if (e.code === 'Backquote' && DEBUG) gui.show(gui._hidden);
+  if (e.code === 'KeyM') {
+    const muted = audio.toggleMute();
+    const el = document.getElementById('hud-mute');
+    el.textContent = muted ? '🔇 MUTED' : '🔊 SOUND ON';
+    el.style.display = 'block';
+    el.style.animation = 'none';
+    el.offsetHeight;
+    el.style.animation = 'muteToast 1.2s forwards';
+    setTimeout(() => { el.style.display = 'none'; }, 1200);
+  }
   if (e.code === 'KeyP' || e.code === 'Escape') {
-    if (gameState === 'playing') { gameState = 'paused'; }
-    else if (gameState === 'paused') { gameState = 'playing'; clock.getDelta(); }
+    if (gameState === 'playing') { gameState = 'paused'; audio.suspend(); }
+    else if (gameState === 'paused') { gameState = 'playing'; audio.resume(); clock.getDelta(); }
   }
 });
 document.addEventListener('keyup', e => { keys[e.code] = false; });
@@ -3112,8 +3148,14 @@ const ROLL_DAMP = 6.5;   // coast/brake when no input (higher = less slide)
 const CAM_ROLL_LAG = 5.0; // camera catch-up (lower = heavier lag)
 
 // ═══════════════════════════════════════════════════
-// DEBUG GUI
+// DEBUG GUI — hidden unless the page is opened with ?debug
+//
+// It exposes speed, ship position and bloom, so leaving it on screen let
+// players tune the difficulty away. It's still built either way, so the
+// panel is one URL parameter (or the ` key) away during development.
 // ═══════════════════════════════════════════════════
+const DEBUG = new URLSearchParams(location.search).has('debug');
+
 const gui = new GUI({ title: 'Tunnel Runner' });
 
 const camFolder = gui.addFolder('Camera Offset');
@@ -3163,11 +3205,14 @@ gui.add({
   }
 }, 'copySettings').name('📋 Copy Settings');
 
+if (!DEBUG) gui.hide();
+
 // ═══════════════════════════════════════════════════
 // ANIMATE — camera follows curve, ship steered by player
 // ═══════════════════════════════════════════════════
 const clock = new THREE.Clock();
 let progress = 0;
+let audioSpeedTimer = 0;
 
 function getOffsetPos(t, offX, offY) {
   const pos = curve.getPointAt(t).clone();
@@ -3282,15 +3327,32 @@ function animate() {
     rollAngle += rollVel * dt;
 
     // Speed increases per level + brief boost from coin pickups
-    // Step synced with FAIR_LEVEL_SPEED_STEP; spawn assumes boost ≤ FAIR_COIN_BOOST_MUL
-    const levelSpeed = 1.0 + (level - 1) * FAIR_LEVEL_SPEED_STEP;
-    if (coinBoostTimer > 0) coinBoostTimer -= playDt;
-    const coinBoost = coinBoostTimer > 0 ? FAIR_COIN_BOOST_MUL : 1.0;
-    progress += settings.speed * boostSpeedMul * levelSpeed * coinBoost * playDt * 0.1;
+    const levelSpeed = 1.0 + (level - 1) * 0.08;
+    if (coinBoostTimer > 0) coinBoostTimer -= dt;
+    const coinBoost = coinBoostTimer > 0 ? 1.3 : 1.0;
+    const travelled = settings.speed * boostSpeedMul * levelSpeed * coinBoost * dt * 0.1;
+    progress += travelled;
     progress %= 1.0;
 
-    // P2 ghost recording (roll vs progress)
-    recordGhostSample();
+    // Distance score. This has to carry a fraction between frames: the old
+    // version rounded per frame, and at 60fps each frame was worth 0.3 points,
+    // so Math.round() returned 0 every time and distance scored nothing at all
+    // (while a slow machine with big dt did score). Accumulate, then bank whole
+    // points, so the rate is identical at any framerate.
+    scoreCarry += travelled * DISTANCE_SCORE;
+    if (scoreCarry >= 1) {
+      const whole = Math.floor(scoreCarry);
+      score += whole;
+      scoreCarry -= whole;
+    }
+
+    // Drive the engine/wind beds from the real tunnel speed. Throttled —
+    // the ramps smooth themselves, so per-frame automation is wasted work.
+    audioSpeedTimer -= dt;
+    if (audioSpeedTimer <= 0) {
+      audioSpeedTimer = 0.1;
+      audio.setSpeed(boostSpeedMul * levelSpeed * coinBoost);
+    }
   }
 
   // ── Tunnel cross-section frame (always runs) ──
@@ -3562,8 +3624,6 @@ function animate() {
 
   // ── Scoring + Level progression (only when playing) ──
   if (gameState === 'playing') {
-    score += Math.round(dt * settings.speed * 100);
-
     // Timer-based level progression (only count down outside transitions)
     if (transitionPhase === 'none') {
       levelTimer -= dt;
@@ -3677,9 +3737,8 @@ function animate() {
         }
 
         // Ship passed through portal → trigger level up
-        if (ptd > 0.002) {
-          tubeMat.uniforms.uOpen.value = 1.0;
-          portalPassExplosion(); // grand cavalcade: confetti + shockwaves
+        if (ptd > 0.003) {
+          audio.play('portal');
           level++;
           shipColorIdx = (level - 1) % GAME_COLORS.length;
           targetHue = (level - 1) * 1.2;
@@ -3741,6 +3800,12 @@ window.__trDebug = {
 // ═══════════════════════════════════════════════════
 // RESIZE
 // ═══════════════════════════════════════════════════
+// Don't keep the engine droning in a background tab.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) audio.suspend();
+  else if (gameState === 'playing') audio.resume();
+});
+
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
