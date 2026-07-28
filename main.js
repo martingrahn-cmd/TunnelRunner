@@ -7,6 +7,8 @@ import { RGBShiftShader } from 'three/addons/shaders/RGBShiftShader.js';
 
 import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
 
+import { audio } from './audio.js';
+
 // ═══════════════════════════════════════════════════
 // SCENE SETUP
 // ═══════════════════════════════════════════════════
@@ -621,6 +623,7 @@ function checkMissions() {
 }
 
 function showMissionComplete(def) {
+  audio.play('mission_complete');
   const el = document.getElementById('hud-mission-complete');
   el.querySelector('.mc-text').textContent = def.desc;
   el.querySelector('.mc-reward').textContent = `+${def.reward}`;
@@ -722,6 +725,7 @@ hudEl.innerHTML = `
   #hud-menu .title { font-size:64px; font-weight:bold; letter-spacing:6px; color:#00ccff; text-shadow:0 0 40px #00ccff, 0 0 80px rgba(0,204,255,0.3); margin-bottom:8px; }
   #hud-menu .subtitle { font-size:16px; letter-spacing:8px; opacity:0.5; margin-bottom:48px; text-transform:uppercase; }
   #hud-menu .prompt { font-size:20px; animation:hudBlink 1.2s infinite; opacity:0.9; }
+  #hud-menu .menu-keys { font-size:12px; letter-spacing:2px; margin-top:20px; opacity:0.4; }
   #hud-menu .highscore { font-size:16px; margin-top:32px; opacity:0.6; }
   #hud-overlay { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:20; align-items:center; justify-content:center; flex-direction:column; font-family:'Courier New',monospace; color:#fff; }
   #hud-overlay h1 { font-size:60px; margin:0 0 16px; color:#ff0044; text-shadow:0 0 40px #ff0044; }
@@ -755,6 +759,8 @@ hudEl.innerHTML = `
   #hud-streak.active { opacity:1; }
   #hud-near-miss { display:none; position:fixed; z-index:15; pointer-events:none; font-family:'Courier New',monospace; font-size:22px; font-weight:bold; color:#00ffaa; text-shadow:0 0 10px rgba(0,255,170,0.5); }
   @keyframes nearMissPop { 0%{opacity:1;transform:translate(-50%,-50%) scale(1.5)} 40%{opacity:1;transform:translate(-50%,-70%) scale(1)} 100%{opacity:0;transform:translate(-50%,-100%) scale(0.8)} }
+  #hud-mute { display:none; position:fixed; bottom:28px; left:50%; transform:translateX(-50%); z-index:30; pointer-events:none; font-family:'Courier New',monospace; font-size:16px; letter-spacing:2px; color:#fff; text-shadow:0 0 10px rgba(255,255,255,0.4); }
+  @keyframes muteToast { 0%{opacity:0} 15%{opacity:0.9} 75%{opacity:0.9} 100%{opacity:0} }
   #hud-mission-complete { display:none; position:fixed; bottom:120px; left:50%; transform:translateX(-50%); z-index:20; pointer-events:none; font-family:'Courier New',monospace; text-align:center; background:rgba(0,0,0,0.7); border:1px solid #ffcc00; border-radius:8px; padding:12px 24px; }
   .mc-label { font-size:12px; letter-spacing:3px; color:#ffcc00; opacity:0.8; }
   .mc-text { font-size:18px; color:#fff; margin:4px 0; }
@@ -798,6 +804,7 @@ hudEl.innerHTML = `
 <div id="hud-coin-popup">+100</div>
 <div id="hud-streak"></div>
 <div id="hud-near-miss">CLOSE!</div>
+<div id="hud-mute">🔊 SOUND ON</div>
 <div id="hud-mission-complete"><div class="mc-label">MISSION COMPLETE</div><div class="mc-text"></div><div class="mc-reward"></div></div>
 <div id="hud-wallet"></div>
 <div id="hud-missions"></div>
@@ -805,6 +812,7 @@ hudEl.innerHTML = `
   <div class="title">TUNNEL RUNNER</div>
   <div class="subtitle">Dodge the light</div>
   <div class="prompt">PRESS SPACE TO START</div>
+  <div class="menu-keys">A / D — STEER &nbsp;·&nbsp; P — PAUSE &nbsp;·&nbsp; M — MUTE</div>
   <div class="highscore" id="menu-highscore"></div>
   <button class="menu-shop-btn" id="menu-shop-btn">SHOP</button>
 </div>
@@ -946,9 +954,14 @@ function renderShop() {
       const id = el.dataset.id;
       if (ownedItems.includes(id)) {
         equipItem(id);
+        audio.play('ui_click');
       } else {
         if (buyItem(id)) {
           equipItem(id);
+          audio.play('ui_buy');
+        } else {
+          // Can't afford it — flat blip rather than the reward chime.
+          audio.play('ui_click', { rate: 0.7, gain: 0.7 });
         }
       }
       renderShop();
@@ -974,6 +987,11 @@ function dodgedObstacle(wasClose) {
     runNearMisses++;
     const bonus = 50 * multiplier;
     score += bonus;
+    // Whoosh rises with the streak so a long clean run keeps escalating.
+    audio.play('near_miss', {
+      rate: 0.95 + Math.min(streak, 30) * 0.012,
+      gain: 0.9,
+    });
     const screenPos = shipGroup.position.clone().project(camera);
     const el = document.getElementById('hud-near-miss');
     el.textContent = `CLOSE! +${bonus}`;
@@ -994,9 +1012,16 @@ function hitObstacle() {
   multiplier = 1;
   runDamageTaken = true;
   lives--;
+
+  audio.play('impact');
+  audio.duck(0.25, 0.2, 0.6);
+
   if (lives <= 0) {
     showGameOver();
   } else {
+    // Last life — warning pulse under the impact tail.
+    if (lives === 1) audio.play('low_life', { delay: 0.35 });
+
     // Red vignette flash
     const flash = document.getElementById('hud-flash');
     flash.style.display = 'block';
@@ -1025,6 +1050,8 @@ function hitObstacle() {
 
 function showGameOver() {
   gameState = 'dead';
+  audio.stopAllLoops(0.25);
+  audio.play('game_over', { delay: 0.15 });
   checkMissions();
   const isNewRecord = saveHighScore();
   document.getElementById('hud-final-score').textContent = score;
@@ -1041,6 +1068,11 @@ function showLevelUp() {
   // ── Straight into BOOST ZONE ──
   transitionPhase = 'boost';
   transitionTimer = BOOST_DURATION;
+
+  audio.play('level_up');
+  audio.play('boost_start', { delay: 0.25 });
+  audio.duck(0.45, 0.3, 0.8);
+  coinChain = 0; // fresh riff for the coin frenzy
 
   // White flash
   const flash = document.getElementById('hud-boost-flash');
@@ -1085,6 +1117,8 @@ function showLevelUp() {
     if (transitionPhase !== 'boost') return;
     transitionPhase = 'start';
     transitionTimer = START_DURATION;
+
+    audio.play('boost_end');
 
     // Place start-portal ahead of ship
     const startPortalT = (progress + 0.04) % 1.0;
@@ -1217,16 +1251,30 @@ function resetGameState() {
   updateHUD();
 }
 
+async function startAmbience() {
+  // First call also creates the AudioContext and decodes the assets, so it
+  // has to be awaited before the loops can find their buffers.
+  await audio.unlock();
+  if (gameState !== 'playing') return;
+  audio.stopAllLoops(0.15);
+  audio.startLoop('engine_loop', { filter: true, fade: 0.5 });
+  audio.startLoop('wind_loop', { filter: true, fade: 0.8 });
+  audio.startLoop('music_loop', { bus: 'music', fade: 1.2 });
+  audio.setSpeed(1);
+}
+
 function startGame() {
   document.getElementById('hud-menu').style.display = 'none';
   document.getElementById('hud-bar').style.display = 'flex';
   resetGameState();
   gameState = 'playing';
+  startAmbience();
 }
 
 function restartGame() {
   resetGameState();
   gameState = 'playing';
+  startAmbience();
 }
 
 // ── Initial menu state ──
@@ -1236,9 +1284,9 @@ if (highScore > 0) menuHs.textContent = `Best: ${highScore}`;
 updateHUD();
 
 // Shop button events
-document.getElementById('menu-shop-btn').addEventListener('click', e => { e.stopPropagation(); openShop(); });
-document.getElementById('gameover-shop-btn').addEventListener('click', e => { e.stopPropagation(); openShop(); });
-document.getElementById('shop-close').addEventListener('click', closeShop);
+document.getElementById('menu-shop-btn').addEventListener('click', e => { e.stopPropagation(); audio.unlock(); audio.play('ui_click'); openShop(); });
+document.getElementById('gameover-shop-btn').addEventListener('click', e => { e.stopPropagation(); audio.play('ui_click'); openShop(); });
+document.getElementById('shop-close').addEventListener('click', () => { audio.play('ui_click'); closeShop(); });
 document.addEventListener('keydown', e => { if (e.code === 'Escape' && document.getElementById('hud-shop').style.display === 'block') { closeShop(); e.stopPropagation(); } }, true);
 
 // ═══════════════════════════════════════════════════
@@ -1594,11 +1642,23 @@ function spawnBoostCoins(startT) {
 // Coin pickup animation particles
 const coinFx = []; // { mesh, vel, life, maxLife }
 
+// Coin pickups climb a pentatonic ladder while you keep collecting, and
+// reset once you drop the chain — turns a coin run into a little riff.
+const COIN_LADDER = [1.0, 1.122, 1.26, 1.498, 1.682, 2.0];
+let coinChain = 0;
+let lastCoinAt = -99;
+
 function collectCoin(coin) {
   coin.collected = true;
   const value = COIN_VALUE * multiplier;
   score += value;
   coinBoostTimer = 0.5;
+
+  const now = clock.getElapsedTime();
+  coinChain = (now - lastCoinAt < 0.7) ? Math.min(coinChain + 1, COIN_LADDER.length - 1) : 0;
+  lastCoinAt = now;
+  audio.play('coin', { rate: COIN_LADDER[coinChain] });
+
   runCoinsCollected++;
   sessionCoins++;
   wallet++;
@@ -1676,6 +1736,9 @@ const debris = []; // active debris pieces
 function explodeObstacle(obs) {
   const mesh = obs.mesh;
   if (!mesh) return;
+
+  // Slightly after the impact, so hull-hit then shrapnel reads in order.
+  audio.play('debris', { delay: 0.08, rate: 0.9 + Math.random() * 0.25 });
 
   // Get obstacle world position, tangent, and color
   const obsPos = mesh.position.clone();
@@ -1915,14 +1978,31 @@ function updateRibbonTrail(trail, newPos, camPos) {
 // ═══════════════════════════════════════════════════
 const keys = {};
 
+// Browsers only allow audio to start from a user gesture — warm the
+// AudioContext up on the very first interaction so the assets are decoded
+// and ready by the time the run actually begins.
+['keydown', 'pointerdown'].forEach(ev =>
+  document.addEventListener(ev, () => audio.unlock(), { once: true })
+);
+
 document.addEventListener('keydown', e => {
   keys[e.code] = true;
   const shopOpen = document.getElementById('hud-shop').style.display === 'block';
   if (e.code === 'Space' && gameState === 'menu' && !shopOpen) startGame();
   if (e.code === 'Space' && gameState === 'dead' && !shopOpen) restartGame();
+  if (e.code === 'KeyM') {
+    const muted = audio.toggleMute();
+    const el = document.getElementById('hud-mute');
+    el.textContent = muted ? '🔇 MUTED' : '🔊 SOUND ON';
+    el.style.display = 'block';
+    el.style.animation = 'none';
+    el.offsetHeight;
+    el.style.animation = 'muteToast 1.2s forwards';
+    setTimeout(() => { el.style.display = 'none'; }, 1200);
+  }
   if (e.code === 'KeyP' || e.code === 'Escape') {
-    if (gameState === 'playing') { gameState = 'paused'; }
-    else if (gameState === 'paused') { gameState = 'playing'; clock.getDelta(); }
+    if (gameState === 'playing') { gameState = 'paused'; audio.suspend(); }
+    else if (gameState === 'paused') { gameState = 'playing'; audio.resume(); clock.getDelta(); }
   }
 });
 document.addEventListener('keyup', e => { keys[e.code] = false; });
@@ -1988,6 +2068,7 @@ gui.add({
 // ═══════════════════════════════════════════════════
 const clock = new THREE.Clock();
 let progress = 0;
+let audioSpeedTimer = 0;
 
 function getOffsetPos(t, offX, offY) {
   const pos = curve.getPointAt(t).clone();
@@ -2047,6 +2128,14 @@ function animate() {
     const coinBoost = coinBoostTimer > 0 ? 1.3 : 1.0;
     progress += settings.speed * boostSpeedMul * levelSpeed * coinBoost * dt * 0.1;
     progress %= 1.0;
+
+    // Drive the engine/wind beds from the real tunnel speed. Throttled —
+    // the ramps smooth themselves, so per-frame automation is wasted work.
+    audioSpeedTimer -= dt;
+    if (audioSpeedTimer <= 0) {
+      audioSpeedTimer = 0.1;
+      audio.setSpeed(boostSpeedMul * levelSpeed * coinBoost);
+    }
   }
 
   // ── Tunnel cross-section frame (always runs) ──
@@ -2256,6 +2345,7 @@ function animate() {
 
         // Ship passed through portal → trigger level up
         if (ptd > 0.003) {
+          audio.play('portal');
           level++;
           shipColorIdx = (level - 1) % GAME_COLORS.length;
           targetHue = (level - 1) * 1.2;
@@ -2293,6 +2383,12 @@ animate();
 // ═══════════════════════════════════════════════════
 // RESIZE
 // ═══════════════════════════════════════════════════
+// Don't keep the engine droning in a background tab.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) audio.suspend();
+  else if (gameState === 'playing') audio.resume();
+});
+
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
