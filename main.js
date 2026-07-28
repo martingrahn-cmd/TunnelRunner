@@ -1575,6 +1575,19 @@ const COIN_VALUE = 100;
 const COIN_COLLECT_DIST = 6.0;  // world-space distance for pickup
 const COIN_MAGNET_DIST = 10.0;  // start pulling coin toward ship
 
+// In-run coins use a much tighter pickup than the boost frenzy. The frenzy is
+// a reward shower and wants to be generous; in normal play a 6-unit magnet
+// would hoover up an edge coin without the player ever going near the edge,
+// which is the entire point of placing it there.
+const COIN_COLLECT_DIST_RUN = 3.2;
+const COIN_MAGNET_DIST_RUN = 5.0;
+
+// Coins that ask you to give up safety margin pay more and look different.
+const RISK_COIN_VALUE = 300;
+const RISK_COIN_WALLET = 3;
+// How far inside the gap's safe edge a risk coin sits, in radians (~8°).
+const RISK_COIN_EDGE_MARGIN = 0.14;
+
 // Shared coin geometry and material
 const coinGeo = new THREE.TorusGeometry(COIN_RADIUS, 0.2, 8, 20);
 const coinMat = new THREE.MeshStandardMaterial({
@@ -1586,10 +1599,138 @@ const coinMat = new THREE.MeshStandardMaterial({
   fog: false,
 });
 
+// Risk coins read as "worth more, costs more" at a glance.
+const riskCoinGeo = new THREE.TorusGeometry(COIN_RADIUS * 1.35, 0.28, 8, 20);
+const riskCoinMat = new THREE.MeshStandardMaterial({
+  color: 0xff44aa,
+  emissive: 0x441122,
+  emissiveIntensity: 0.4,
+  metalness: 0.9,
+  roughness: 0.2,
+  fog: false,
+});
+
+// The angle convention used everywhere for "position around the tunnel" is
+// the same one the ship's rollAngle uses:
+//   dir(a) = -cos(a) * normal + sin(a) * right
+// so a coin at angle `a` sits exactly where the ship sits at rollAngle == a.
+function tunnelFrame(t) {
+  const center = curve.getPointAt(t);
+  const tan = curve.getTangentAt(t).normalize();
+  const right = new THREE.Vector3().crossVectors(tan, new THREE.Vector3(0, 1, 0)).normalize();
+  const normal = new THREE.Vector3().crossVectors(right, tan).normalize();
+  return { center, tan, right, normal };
+}
+
+function angleToDir(angle, frame) {
+  return new THREE.Vector3()
+    .addScaledVector(frame.normal, -Math.cos(angle))
+    .addScaledVector(frame.right, Math.sin(angle));
+}
+
+// Recover the roll angle of a world-space gap direction. Inverse of angleToDir.
+function dirToAngle(dir, frame) {
+  return Math.atan2(dir.dot(frame.right), -dir.dot(frame.normal));
+}
+
+function shortestAngleDelta(from, to) {
+  let d = (to - from) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+function addCoin(t, angle, { risk = false } = {}) {
+  const frame = tunnelFrame(t);
+  const radius = TUBE_R - 1.5;
+  const pos = frame.center.clone().addScaledVector(angleToDir(angle, frame), radius);
+
+  // Shared material, not a clone: nothing here mutates it per coin, and a run
+  // places ~110 of these, rebuilt on every restart.
+  const mesh = new THREE.Mesh(risk ? riskCoinGeo : coinGeo, risk ? riskCoinMat : coinMat);
+  mesh.position.copy(pos);
+  mesh.lookAt(pos.clone().add(frame.tan));
+  mesh.visible = false;
+  scene.add(mesh);
+
+  coins.push({
+    t, mesh, collected: false, risk,
+    tan: frame.tan.clone(), // fixed per coin; used by the swept pickup test
+    lastTd: undefined,
+    value: risk ? RISK_COIN_VALUE : COIN_VALUE,
+    worth: risk ? RISK_COIN_WALLET : 1,
+    fxColor: risk ? 0xff44aa : 0xffcc00,
+  });
+}
+
+// Coins during normal play. Two jobs:
+//
+//  · Path coins trace the line between one obstacle's gap and the next, so
+//    they teach the racing line and reward rotating early and smoothly.
+//  · Risk coins sit inside a gap but pushed out toward its edge, so taking
+//    one means giving up safety margin — which also puts you in near-miss
+//    range, feeding the streak bonus that already exists.
+//
+// Spinning obstacles are skipped for gap-anchored coins: their gap moves, so
+// anything placed in it would end up buried inside a wall by the time you
+// arrive.
 function generateCoins() {
   coins.forEach(c => { if (c.mesh) scene.remove(c.mesh); });
   coins.length = 0;
-  // Coins are only spawned during boost zones now
+  if (obstacles.length === 0) return;
+
+  // Gap angle per obstacle, in ship-roll terms. null == don't anchor to it.
+  const gapAngles = obstacles.map(obs => {
+    if (obs.spinning || obs.gapDirs.length === 0) return null;
+    const frame = tunnelFrame(obs.t);
+    // For multi-gap patterns, anchor to the first gap; the risk coin below
+    // then makes that specific gap the rewarding one to commit to.
+    return dirToAngle(obs.gapDirs[0], frame);
+  });
+
+  for (let i = 0; i < obstacles.length; i++) {
+    const obs = obstacles[i];
+    const angle = gapAngles[i];
+    if (angle === null) continue;
+
+    // ── Risk coin: in the gap, shoved toward its edge ──
+    // Anchored to the same safe edge the collision test uses
+    // (sliceAngle/2 - 0.05, see obs.gapHalfCos), then pulled back by a fixed
+    // margin. A fixed *fraction* of the gap instead would land deep in safe
+    // territory on wide patterns and only bite on narrow ones; measuring from
+    // the edge makes the cost the same wherever it's placed — and puts the
+    // player inside the existing near-miss band, so the streak bonus pays out.
+    if (Math.random() < 0.38) {
+      const safeHalf = obs.sliceAngle / 2 - 0.05;
+      const offset = Math.max(0, safeHalf - RISK_COIN_EDGE_MARGIN);
+      const side = Math.random() < 0.5 ? -1 : 1;
+      addCoin(obs.t, angle + side * offset, { risk: true });
+    }
+
+    // ── Path coins: an arc from this gap toward the next one ──
+    const next = obstacles[i + 1];
+    if (!next) continue;
+    const span = next.t - obs.t;
+    if (span <= 0 || span > 0.1) continue; // skip the wrap-around seam
+
+    // Aim at the next gap when it's static; otherwise just hold this line.
+    const targetAngle = gapAngles[i + 1] ?? angle;
+    const delta = shortestAngleDelta(angle, targetAngle);
+
+    // More coins when there's more rotating to do, so a big swing is the
+    // best-paying line rather than just the most dangerous one.
+    const count = 3 + Math.round(Math.abs(delta) / Math.PI * 3);
+    const tStart = obs.t + span * 0.22;
+    const tEnd = obs.t + span * 0.82;
+
+    for (let c = 0; c < count; c++) {
+      const f = count === 1 ? 0.5 : c / (count - 1);
+      // Ease the arc so it leads slightly ahead of a linear rotation — the
+      // player has to commit early, which is the habit worth teaching.
+      const eased = f * f * (3 - 2 * f);
+      addCoin(tStart + (tEnd - tStart) * f, angle + delta * eased);
+    }
+  }
 }
 
 // ── Boost zone bonus coins (spawned in patterns during speed zone) ──
@@ -1656,27 +1797,30 @@ let lastCoinAt = -99;
 
 function collectCoin(coin) {
   coin.collected = true;
-  const value = COIN_VALUE * multiplier;
+  const value = (coin.value ?? COIN_VALUE) * multiplier;
   score += value;
   coinBoostTimer = 0.5;
 
   const now = clock.getElapsedTime();
   coinChain = (now - lastCoinAt < 0.7) ? Math.min(coinChain + 1, COIN_LADDER.length - 1) : 0;
   lastCoinAt = now;
-  audio.play('coin', { rate: COIN_LADDER[coinChain] });
+  // Risk coins ring a fifth above the ladder so they're audibly the good one.
+  audio.play('coin', { rate: COIN_LADDER[coinChain] * (coin.risk ? 1.5 : 1) });
 
-  runCoinsCollected++;
-  sessionCoins++;
-  wallet++;
+  const worth = coin.worth ?? 1;
+  runCoinsCollected += worth;
+  sessionCoins += worth;
+  wallet += worth;
   saveWallet();
   checkMissions();
 
   // Spawn sparkle particles at coin position
   const pos = coin.mesh.position.clone();
-  for (let i = 0; i < 8; i++) {
+  const sparkCount = coin.risk ? 14 : 8;
+  for (let i = 0; i < sparkCount; i++) {
     const geo = new THREE.OctahedronGeometry(0.15 + Math.random() * 0.1);
     const mat = new THREE.MeshBasicMaterial({
-      color: 0xffcc00,
+      color: coin.fxColor ?? 0xffcc00,
       transparent: true,
       opacity: 1,
       fog: false,
@@ -2307,6 +2451,48 @@ function animate() {
       // Reset flags once ship is far away
       if (absTd > 0.02) { obs.hit = false; obs.dodged = false; obs._bestGapDot = undefined; }
       obs.lastTd = td;
+    }
+  }
+
+  // ── In-run coins ──
+  // Hidden during transitions, where the boost frenzy owns the screen.
+  if (!inTransition && shipGroup) {
+    // Measure against the ship, which rides slightly ahead of the camera.
+    const shipTNow = (progress + 0.006) % 1.0;
+
+    for (const coin of coins) {
+      if (coin.collected) continue;
+      const td = tDist(shipTNow, coin.t); // < 0 = ahead of us, > 0 = passed
+      coin.mesh.visible = td > -0.08 && td < 0.004;
+      if (coin.mesh.visible) {
+        coin.mesh.rotation.z += dt * (coin.risk ? 4.0 : 2.5);
+      }
+
+      if (gameState === 'playing') {
+        // Gentle pull while approaching, for feel only — small enough that it
+        // can't drag an edge coin over to a player who stayed safe.
+        if (td > -0.006 && td < 0) {
+          const dist = shipGroup.position.distanceTo(coin.mesh.position);
+          if (dist < COIN_MAGNET_DIST_RUN && dist > COIN_COLLECT_DIST_RUN) {
+            const pullDir = shipGroup.position.clone().sub(coin.mesh.position).normalize();
+            coin.mesh.position.addScaledVector(pullDir, dt * 12);
+          }
+        }
+
+        // Swept pickup. A plain distance test point-samples the ship's path:
+        // at speed the ship covers more ground per frame than the pickup
+        // radius, so coins get tunnelled straight through — and how often that
+        // happened depended on the framerate. Instead, detect the frame where
+        // the ship crosses the coin's plane and measure only the lateral
+        // offset there, which is exactly "were you at the right roll angle as
+        // you went past".
+        if (coin.lastTd !== undefined && coin.lastTd < 0 && td >= 0) {
+          const rel = shipGroup.position.clone().sub(coin.mesh.position);
+          const lateral = rel.sub(coin.tan.clone().multiplyScalar(rel.dot(coin.tan))).length();
+          if (lateral < COIN_COLLECT_DIST_RUN) collectCoin(coin);
+        }
+        coin.lastTd = td;
+      }
     }
   }
 
