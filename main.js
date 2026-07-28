@@ -464,6 +464,11 @@ const GAME_COLORS = [
 
 let gameState = 'menu';
 let score = 0;
+// Points per unit of tunnel travelled. Tuned so level 1 pays ~18/sec, which
+// is what the original per-frame formula was aiming for. Because it's driven
+// by distance rather than time, later levels pay more simply for being faster.
+const DISTANCE_SCORE = 1000;
+let scoreCarry = 0; // fractional points not yet banked into `score`
 let level = 1;
 let shipColorIdx = 0;
 const LEVEL_DURATION = 25; // seconds per level
@@ -1217,6 +1222,7 @@ function hidePortal() {
 
 function resetGameState() {
   score = 0;
+  scoreCarry = 0;
   level = 1;
   levelTimer = LEVEL_DURATION;
   lives = 3;
@@ -1990,6 +1996,7 @@ document.addEventListener('keydown', e => {
   const shopOpen = document.getElementById('hud-shop').style.display === 'block';
   if (e.code === 'Space' && gameState === 'menu' && !shopOpen) startGame();
   if (e.code === 'Space' && gameState === 'dead' && !shopOpen) restartGame();
+  if (e.code === 'Backquote' && DEBUG) gui.show(gui._hidden);
   if (e.code === 'KeyM') {
     const muted = audio.toggleMute();
     const el = document.getElementById('hud-mute');
@@ -2012,8 +2019,14 @@ let rollAngle = 0;
 const rollSpeed = 4.0; // radians per second
 
 // ═══════════════════════════════════════════════════
-// DEBUG GUI
+// DEBUG GUI — hidden unless the page is opened with ?debug
+//
+// It exposes speed, ship position and bloom, so leaving it on screen let
+// players tune the difficulty away. It's still built either way, so the
+// panel is one URL parameter (or the ` key) away during development.
 // ═══════════════════════════════════════════════════
+const DEBUG = new URLSearchParams(location.search).has('debug');
+
 const gui = new GUI({ title: 'Tunnel Runner' });
 
 const camFolder = gui.addFolder('Camera Offset');
@@ -2062,6 +2075,8 @@ gui.add({
     });
   }
 }, 'copySettings').name('📋 Copy Settings');
+
+if (!DEBUG) gui.hide();
 
 // ═══════════════════════════════════════════════════
 // ANIMATE — camera follows curve, ship steered by player
@@ -2126,8 +2141,21 @@ function animate() {
     const levelSpeed = 1.0 + (level - 1) * 0.08;
     if (coinBoostTimer > 0) coinBoostTimer -= dt;
     const coinBoost = coinBoostTimer > 0 ? 1.3 : 1.0;
-    progress += settings.speed * boostSpeedMul * levelSpeed * coinBoost * dt * 0.1;
+    const travelled = settings.speed * boostSpeedMul * levelSpeed * coinBoost * dt * 0.1;
+    progress += travelled;
     progress %= 1.0;
+
+    // Distance score. This has to carry a fraction between frames: the old
+    // version rounded per frame, and at 60fps each frame was worth 0.3 points,
+    // so Math.round() returned 0 every time and distance scored nothing at all
+    // (while a slow machine with big dt did score). Accumulate, then bank whole
+    // points, so the rate is identical at any framerate.
+    scoreCarry += travelled * DISTANCE_SCORE;
+    if (scoreCarry >= 1) {
+      const whole = Math.floor(scoreCarry);
+      score += whole;
+      scoreCarry -= whole;
+    }
 
     // Drive the engine/wind beds from the real tunnel speed. Throttled —
     // the ramps smooth themselves, so per-frame automation is wasted work.
@@ -2321,8 +2349,6 @@ function animate() {
 
   // ── Scoring + Level progression (only when playing) ──
   if (gameState === 'playing') {
-    score += Math.round(dt * settings.speed * 100);
-
     // Timer-based level progression (only count down outside transitions)
     if (transitionPhase === 'none') {
       levelTimer -= dt;
