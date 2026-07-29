@@ -532,6 +532,12 @@ let perfectLevelsThisRun = 0;
 // ── Streak & multiplier ──
 let streak = 0;          // consecutive obstacles dodged
 let multiplier = 1;      // score multiplier (increases with streak)
+// The multiplier used to be uncapped: 1 + streak/5 with no ceiling reached
+// x120+ in a long run, which multiplied every near miss and every one of the
+// ~110 coins per lap into meaningless numbers and made the high score a
+// function of run length rather than skill. Capped at the streak-45 value, so
+// the climb still matters but the score stays readable.
+const MAX_MULTIPLIER = 10;
 let coinBoostTimer = 0;  // brief speed burst after coin pickup
 
 // ═══════════════════════════════════════════════════
@@ -748,15 +754,35 @@ function getAvailableMissions() {
   return MISSION_DEFS.filter(m => !completedMissionIds.includes(m.id));
 }
 
-function pickNewMissions() {
-  const available = getAvailableMissions();
-  const activeIds = activeMissions ? activeMissions.map(m => m.id) : [];
-  const pool = available.filter(m => !activeIds.includes(m.id));
+// excludeIds: missions completed in this same pass. Without them the cycle
+// restart below can re-offer the mission the player just finished, in the same
+// frame the "MISSION COMPLETE" banner is showing it.
+function pickNewMissions(excludeIds = []) {
+  const activeIds = [
+    ...(activeMissions ? activeMissions.map(m => m.id) : []),
+    ...excludeIds,
+  ];
+  let pool = getAvailableMissions().filter(m => !activeIds.includes(m.id));
 
-  // Fill up to 3
+  // Completed ids were never cleared, so once all MISSION_DEFS had been done
+  // this returned nothing, initMissions() gave up, and the mission system was
+  // permanently empty for that player — a hard wall roughly 18 missions in.
+  // Start a fresh cycle instead so they keep rotating.
+  if (pool.length === 0 && completedMissionIds.length > 0) {
+    completedMissionIds = [];
+    pool = MISSION_DEFS.filter(m => !activeIds.includes(m.id));
+  }
+
+  // Fill up to 3. Fisher–Yates: sorting by a random comparator is not a
+  // uniform shuffle, so some missions were far likelier to be offered.
   const needed = 3 - (activeMissions ? activeMissions.length : 0);
+  const shuffled = pool.slice();
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+
   const picked = [];
-  const shuffled = pool.sort(() => Math.random() - 0.5);
   for (let i = 0; i < Math.min(needed, shuffled.length); i++) {
     picked.push({ id: shuffled[i].id, progress: 0 });
   }
@@ -822,7 +848,7 @@ function checkMissions() {
 
   if (completed.length > 0) {
     // Fill new missions
-    const picks = pickNewMissions();
+    const picks = pickNewMissions(completed.map(m => m.id));
     activeMissions.push(...picks);
     saveMissions();
   }
@@ -1246,7 +1272,7 @@ function showFloatText(label, color, bonus) {
 
 function dodgedObstacle(wasClose) {
   streak++;
-  multiplier = 1 + Math.floor(streak / 5);
+  multiplier = Math.min(MAX_MULTIPLIER, 1 + Math.floor(streak / 5));
   if (streak > runMaxStreak) runMaxStreak = streak;
 
   if (wasClose && shipGroup) {
